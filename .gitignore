@@ -1,0 +1,60 @@
+# === Output e dati locali (non vanno nel repository) ===
+output/
+test_data/
+AOIs/
+Sentinel-2/
+ancillary/
+img/
+backup/
+ProgettoTecnico/
+ARTICOLI/
+docs/
+TEST-DATA-PowerPoint/
+
+# === Script di test e analisi locali ===
+test_*.py
+check_*.py
+download_*.py
+reset*.py
+sample_*.py
+
+# === Notebook e documentazione locale ===
+*.ipynb
+*.html
+*.md
+note_*.md
+
+# === File di progetto QGIS ===
+*.qgs
+*.qgs~
+
+# === Archivi ===
+*.zip
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*.pyo
+.eggs/
+*.egg-info/
+dist/
+build/
+.env
+.venv
+venv/
+env/
+
+# === Log e file temporanei ===
+*.log
+*.tmp
+*.tmp.tif
+
+# === OS ===
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# === IDE ===
+.vscode/
+.idea/
+*.code-workspace
