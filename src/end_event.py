@@ -52,6 +52,9 @@ def close_event(event_id, output_dir, reason="manual",
         Motivo della chiusura.
     current_nbr : np.ndarray, optional
         NBR della scena corrente. Usato per aggiornare previous_nbr.
+    valid_mask : np.ndarray (bool), optional
+        Maschera pixel validi della scena corrente. I pixel non validi
+        vengono scritti come NaN in previous_nbr.
     previous_nbr_path : str o Path, optional
         Path del file previous_nbr.tif da aggiornare in-place.
     scene_date : str, optional
@@ -89,9 +92,7 @@ def close_event(event_id, output_dir, reason="manual",
     confirmed = (burnt_count >= config.EVENT_MIN_DETECTIONS)
 
     # --- Severity finale ---
-    # La severity e' calcolata sui pixel confermati (burnt_count >= EVENT_MIN_DETECTIONS).
-    # Con DNBR_THRESHOLD=0.10, i pixel Low Severity accumulano burnt_count normalmente
-    # e compaiono in confirmed se superano EVENT_MIN_DETECTIONS rilevazioni.
+    # Classificazione sui pixel confermati (burnt_count >= EVENT_MIN_DETECTIONS).
     severity_final = classify.classify_severity(max_dnbr, confirmed)
 
     # --- Filtri morfologici sul prodotto finale ---
@@ -100,11 +101,9 @@ def close_event(event_id, output_dir, reason="manual",
     valid_mask_final = obs_count > 0
     severity_final = postprocess.morphological_filter(severity_final, valid_mask_final)
 
-    # --- Rimuovi cluster bruciati < soglia area (falsi positivi sparsi) ---
-    # Stessa soglia usata per le scene preliminari. Il check viene fatto PRIMA
-    # della verifica FP: se tutti i cluster sono sotto soglia, l'area filtrata
-    # sara' 0 ha e l'evento verra' scartato come false positive nel blocco
-    # successivo (invece di essere salvato con severity_final vuota).
+    # --- Rimuovi cluster bruciati < soglia area ---
+    # Applicato prima della verifica FP: se nessun cluster supera la soglia,
+    # l'area filtrata sara' 0 ha e l'evento verra' scartato come false positive.
     _pixel_res_m = abs(profile["transform"].a)
     if config.OUTPUT_NOISE_FILTER_MIN_AREA_HA > 0:
         severity_final = postprocess.filter_small_clusters(
@@ -122,7 +121,7 @@ def close_event(event_id, output_dir, reason="manual",
     if total_ha_check < config.MIN_ALERT_AREA_HA:
         n_valid = int(np.max(obs_count)) if obs_count is not None else 0
         logger.info(
-            "Evento %s -> FALSE POSITIVE | motivo chiusura: %s | "
+            "  Evento %s -> FALSE POSITIVE | motivo chiusura: %s | "
             "area confermata %.1f ha < soglia %.1f ha | scene valide nella finestra: %d",
             event_id, reason, total_ha_check, config.MIN_ALERT_AREA_HA, n_valid,
         )
@@ -165,8 +164,8 @@ def close_event(event_id, output_dir, reason="manual",
     data_io.write_geotiff(_sev_crop, _profile_crop, severity_path,
                           dtype="uint8", nodata=0)
 
-    # Usa la data della scena di chiusura (ancora la cooldown al tempo
-    # dell'incendio, non al wall-clock). Se non disponibile, fallback a now().
+    # Data di riferimento: scena corrente (tempo reale dell'evento);
+    # fallback a now() se non disponibile.
     if scene_date:
         closed_date = str(scene_date)
     else:
@@ -174,14 +173,12 @@ def close_event(event_id, output_dir, reason="manual",
 
     # --- Vettorializzazione con metadati evento ---
     _alert_scene_id = state.get("alert_scene_id", "")
-    _satellite = _alert_scene_id.split("_")[0] if _alert_scene_id else ""
 
     meta = {
         "event_id": event_id,
         "detection_date": state.get("alert_date", ""),
         "closed_date": closed_date,
         "closure_reason": reason,
-        "satellite": _satellite,
         "n_detection_scenes": int(state.get("n_detection_scenes", 0)),
         "tile": state.get("tile", ""),
         "aoi_ref": state.get("aoi", ""),
@@ -247,11 +244,6 @@ def close_event(event_id, output_dir, reason="manual",
             _keep_ids = np.where(_counts >= _min_px)[0]
             _keep_mask = np.isin(_lab, _keep_ids)
             n_dropped = int(raw_burnt.sum() - _keep_mask.sum())
-            if n_dropped > 0:
-                logger.info(
-                    "Footprint: scartati %d pixel sparsi (cluster < %.1f ha)",
-                    n_dropped, config.FOOTPRINT_MIN_CLUSTER_HA,
-                )
             raw_burnt = _keep_mask
 
     # Genera il perimetro con dissolve + closing morfologico + espansione netta.
@@ -297,19 +289,12 @@ def close_event(event_id, output_dir, reason="manual",
                 _fp_features, gpkg_path,
                 crs=_crs_str, layer_name="fire_footprint",
             )
-            logger.info(
-                "Fire footprint salvata: %d px raw | gpkg=%s",
-                int(raw_burnt.sum()), gpkg_path,
-            )
     except Exception as _fp_exc:
         logger.warning("Errore salvataggio fire_footprint.gpkg: %s", _fp_exc)
 
     # --- Aggiorna previous_nbr con l'NBR della scena di chiusura ---
-    # Pixel validi   -> NBR corrente (post-fire misurato)
-    # Pixel invalidi -> NaN: esclusi automaticamente dal calcolo dNBR nella
-    #                  scena successiva (NaN > soglia = False). Quando tornano
-    #                  validi, previous_nbr viene aggiornato col NBR corrente
-    #                  e il delta torna a zero. Nessuna inferenza necessaria.
+    # Pixel validi   -> NBR post-fire corrente
+    # Pixel invalidi -> NaN (esclusi dal dNBR fino al prossimo passaggio valido)
     if current_nbr is not None and previous_nbr_path is not None:
         try:
             _, prev_profile = data_io.read_band(str(previous_nbr_path))
@@ -323,10 +308,6 @@ def close_event(event_id, output_dir, reason="manual",
             data_io.write_geotiff(
                 consolidated, prev_profile,
                 str(previous_nbr_path), dtype="float32",
-            )
-            logger.info(
-                "previous_nbr aggiornato alla scena di chiusura (evento %s, %d px invalidi -> NaN)",
-                event_id, n_invalid,
             )
         except (OSError, ValueError) as exc:
             logger.warning(
@@ -343,7 +324,7 @@ def close_event(event_id, output_dir, reason="manual",
         if k >= 4  # solo classi fire (Low … High); ER-H/ER-L/Unburned esclusi
     )
     logger.info(
-        "Evento %s chiuso (%s) | %.1f ha [%s] | %d scene rilevamento | output=%s",
+        "  Evento %s chiuso (%s) | %.1f ha [%s] | %d scene rilevamento | output=%s",
         event_id, reason, total_ha, _class_summary, summary["n_detection_scenes"], gpkg_path,
     )
     return summary

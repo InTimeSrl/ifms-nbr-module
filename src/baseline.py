@@ -73,11 +73,10 @@ def save_nbr(data, profile, path):
 # ---------------------------------------------------------------------------
 
 def _filter_baseline_scenes(scenes):
-    """Filtra scene per la costruzione della baseline (solo qualita').
+    """Filtra le scene pre-campagna per qualita' (cloud cover, processing baseline).
 
-    Usa gli stessi criteri di qualita' di pipeline._filter_scenes, ma senza
-    controllare lo stato di processamento (le scene pre-campagna
-    non entrano nel loop di monitoraggio).
+    Le scene pre-campagna non sono tracciate dal watermark: il filtro
+    controlla solo i criteri di qualita' radiometrica.
     """
     valid = []
     for scene in scenes:

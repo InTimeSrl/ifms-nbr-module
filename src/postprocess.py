@@ -2,13 +2,11 @@
 postprocess.py -- Filtri morfologici e vettorializzazione poligoni bruciati.
 
 Operazioni:
-  1. Sieve: rimozione patch isolate < MIN_PATCH_PIXELS (default 4 px = 0.16 ha)
-  2. Fill holes: riempimento buchi < HOLE_FILL_PIXELS nei poligoni
-  3. Vectorize: conversione raster severita' -> poligoni GeoJSON con attributi
-     (classe, label, area_ha)
+  1. Sieve: rimozione patch isolate < MIN_PATCH_PIXELS
+  2. Fill holes: riempimento buchi interni < HOLE_FILL_PIXELS
+  3. Vectorize by severity: dissolve per classe severita' (3-7)
+     -> feature MultiPolygon con attributi area_ha, dnbr_mean, metadati evento
   4. RGB HONC: composito Highlight Optimized Natural Color per visualizzazione
-
-Usato da pipeline.py (process_scene) quando viene rilevato un incendio.
 
 Ref: progetto tecnico, fase post-processing.
 """
@@ -74,63 +72,6 @@ def morphological_filter(severity, valid_mask):
     return out
 
 
-def vectorize(severity, profile):
-    """Converte la mappa di severita' in poligoni GeoJSON.
-
-    Genera un poligono per ogni regione contigua con severita' >= 4
-    (Low Severity e superiore). Ogni feature ha attributi:
-    - class_id: codice severita' (4-7)
-    - class_label: nome della classe USGS
-    - area_ha: area del poligono in ettari
-
-    Parameters
-    ----------
-    severity : np.ndarray (uint8)
-        Mappa di severita' filtrata (da morphological_filter).
-    profile : dict
-        Profilo rasterio (contiene transform e CRS).
-
-    Returns
-    -------
-    list[dict]
-        Lista di feature GeoJSON (geometry + properties).
-    """
-    transform = profile["transform"]
-    # Risoluzione pixel in metri (per calcolo area)
-    pixel_res = abs(transform.a)  # dimensione pixel in m
-    pixel_area_ha = (pixel_res * pixel_res) / 10000.0
-
-    features = []
-    # Estrai solo pixel bruciati (class >= 4)
-    burnt_mask = (severity >= 4).astype("uint8")
-    if not burnt_mask.any():
-        return features
-
-    for geom_dict, class_val in shapes(severity, mask=burnt_mask, transform=transform):
-        class_id = int(class_val)
-        if class_id < 4:
-            continue
-
-        geom = shape(geom_dict)
-        class_info = config.SEVERITY_CLASSES.get(class_id, {})
-
-        # Area: conta pixel nel poligono (approssimazione dal raster)
-        n_pixels = geom.area / (pixel_res * pixel_res)
-        area_ha = n_pixels * pixel_area_ha
-
-        features.append({
-            "type": "Feature",
-            "geometry": mapping(geom),
-            "properties": {
-                "class_id": class_id,
-                "class_label": class_info.get("label", ""),
-                "area_ha": round(area_ha, 2),
-            },
-        })
-
-    return features
-
-
 def vectorize_by_severity(severity, dnbr, profile, meta=None):
     """Dissolve per classe di severita' -> 1 feature MultiPolygon per classe.
 
@@ -150,7 +91,7 @@ def vectorize_by_severity(severity, dnbr, profile, meta=None):
     meta : dict, optional
         Attributi globali da aggiungere a ogni feature:
         - event_id, detection_date, processing_mode, aoi_ref,
-          cloud_cover_pct, index_mode, index_threshold, satellite
+          cloud_cover_pct, index_mode, index_threshold
 
     Returns
     -------
@@ -198,7 +139,6 @@ def vectorize_by_severity(severity, dnbr, profile, meta=None):
             "detection_date": meta.get("detection_date", ""),
             "closed_date": meta.get("closed_date", ""),
             "closure_reason": meta.get("closure_reason", ""),
-            "satellite": meta.get("satellite", ""),
             "tile": meta.get("tile", ""),
             "aoi_ref": meta.get("aoi_ref", ""),
             "index_mode": meta.get("index_mode", ""),
@@ -224,27 +164,26 @@ def vectorize_by_severity(severity, dnbr, profile, meta=None):
 # ---------------------------------------------------------------------------
 
 def filter_small_clusters(severity, pixel_res_m, min_area_ha):
-    """Removes burnt clusters smaller than min_area_ha from a severity map.
+    """Rimuove dalla mappa di severita' i cluster bruciati inferiori a min_area_ha.
 
-    All connected components (8-connected) with area >= min_area_ha are kept,
-    regardless of their position. Isolated pixels and small clusters are zeroed.
-    This is applied to severity_final before vectorisation and footprint generation
-    so that all output products (burnt_final, fire_footprint, severity_final.tif)
-    are consistent and noise-free.
+    Mantiene le componenti connesse (8-connesse) con area >= min_area_ha;
+    le componenti piu' piccole vengono azzerate. Applicato prima della
+    vettorializzazione per garantire coerenza tra severity_final.tif,
+    burnt_final e fire_footprint.
 
     Parameters
     ----------
     severity : np.ndarray (uint8, 2D)
-        Severity map (0 = nodata, 1-7 = USGS classes).
+        Mappa severita' (0 = nodata, 1-7 = classi USGS).
     pixel_res_m : float
-        Pixel resolution in metres (typically 20.0 for Sentinel-2).
+        Risoluzione pixel in metri (tipicamente 20.0 per Sentinel-2).
     min_area_ha : float
-        Minimum cluster area in hectares to keep.
+        Area minima del cluster (ha) per essere mantenuto.
 
     Returns
     -------
     np.ndarray (uint8)
-        Filtered severity map.
+        Mappa severita' filtrata.
     """
     burnt = (severity >= 4)
     if not burnt.any():

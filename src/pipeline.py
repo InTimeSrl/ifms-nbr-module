@@ -319,7 +319,8 @@ def process_aoi(aoi, scene_dir=None, stac_client=None, output_dir="output",
             continue
 
         tile_scenes_processed = 0
-        tile_alerts = 0
+        tile_alerts = 0       # eventi aperti in questo run
+        tile_fp_count = 0     # eventi chiusi come falso positivo in questo run
 
         for scene in tile_scenes:
             scene_id = scene["stac_item_id"]
@@ -346,7 +347,7 @@ def process_aoi(aoi, scene_dir=None, stac_client=None, output_dir="output",
                 _rc_denom   = _rc_land_px if _rc_land_px > 0 else _rc_vm.size
                 _rc_valid_pct = 100.0 * float(_rc_vm.sum()) / _rc_denom
                 if _rc_valid_pct < config.SCENE_VALID_SCL_PCT:
-                    logger.info("  Ricalibrazione rimandata: scena %s SCL %.1f%% < %.0f%% (needs_recalibrate rimane)",
+                    logger.info("  Ricalibrazione rimandata: scena %s SCL %.1f%% < %.0f%%",
                                 scene_id, _rc_valid_pct, config.SCENE_VALID_SCL_PCT)
                     pipeline_state.update_watermark(tile_state, scene.get("datetime", scene.get("date", "")))
                     pipeline_state.save_state(tile_state, tile_data_dir)
@@ -357,7 +358,7 @@ def process_aoi(aoi, scene_dir=None, stac_client=None, output_dir="output",
                 baseline.save_nbr(previous_nbr, result["profile"], paths["previous"])
                 del tile_state["needs_recalibrate"]
                 pipeline_state.save_state(tile_state, tile_data_dir)
-                logger.info("  Ricalibrazione previous_nbr completata (scena %s, SCL %.1f%%), detection saltata",
+                logger.info("  Ricalibrazione previous_nbr completata (scena %s, SCL %.1f%%)",
                             scene_id, _rc_valid_pct)
                 pipeline_state.update_watermark(tile_state, scene.get("datetime", scene.get("date", "")))
                 pipeline_state.save_state(tile_state, tile_data_dir)
@@ -421,8 +422,8 @@ def process_aoi(aoi, scene_dir=None, stac_client=None, output_dir="output",
                         _gpkg_fp = Path(tile_output_dir) / f"{_eid}.gpkg"
                         if _gpkg_fp.exists():
                             _gpkg_fp.unlink(missing_ok=True)
-                        logger.info("Output rimossi (false_positive): %s", _eid)
-                        tile_alerts -= 1
+                        logger.info("  Output rimossi (false_positive): %s", _eid)
+                        tile_fp_count += 1
                     _frozen_del = Path(tile_data_dir) / f"frozen_nbr_{_eid}_temp.tif"
                     _frozen_del.unlink(missing_ok=True)
                     tile_state["needs_recalibrate"] = True
@@ -456,8 +457,8 @@ def process_aoi(aoi, scene_dir=None, stac_client=None, output_dir="output",
                         _gpkg_fp = Path(tile_output_dir) / f"{_eid}.gpkg"
                         if _gpkg_fp.exists():
                             _gpkg_fp.unlink(missing_ok=True)
-                        logger.info("Output rimossi (false_positive): %s", _eid)
-                        tile_alerts -= 1
+                        logger.info("  Output rimossi (false_positive): %s", _eid)
+                        tile_fp_count += 1
                     _frozen_del = Path(tile_data_dir) / f"frozen_nbr_{_eid}_temp.tif"
                     _frozen_del.unlink(missing_ok=True)
                     active_eids.remove(_eid)
@@ -585,19 +586,6 @@ def process_aoi(aoi, scene_dir=None, stac_client=None, output_dir="output",
                         _ys, _xs = np.where(_cln["mask"])
                         _x, _y = _rt.xy(_tr, float(_ys.mean()), float(_xs.mean()))
                         _cl_xy.append((_x, _y))
-                    # Log distanze (utile per calibrare la soglia)
-                    if len(new_clusters) > 1:
-                        for _ci in range(1, len(new_clusters)):
-                            _dx = _cl_xy[0][0] - _cl_xy[_ci][0]
-                            _dy = _cl_xy[0][1] - _cl_xy[_ci][1]
-                            _d_km = (_dx**2 + _dy**2)**0.5 / 1000
-                            _merge = _d_km <= config.MAX_INITIAL_MERGE_DISTANCE_KM
-                            logger.info(
-                                "  cluster #0 %.1f ha  +  cluster #%d %.1f ha  |  dist=%.1f km  -> %s",
-                                new_clusters[0]["area_ha"],
-                                _ci, new_clusters[_ci]["area_ha"], _d_km,
-                                "UNITI" if _merge else f"SEPARATI (soglia {config.MAX_INITIAL_MERGE_DISTANCE_KM:.0f} km)",
-                            )
                     # Union-Find: raggruppa cluster entro soglia
                     _uf = list(range(len(new_clusters)))
                     def _uf_find(x):
@@ -698,8 +686,8 @@ def process_aoi(aoi, scene_dir=None, stac_client=None, output_dir="output",
                     _gpkg_fp = Path(tile_output_dir) / f"{eid}.gpkg"
                     if _gpkg_fp.exists():
                         _gpkg_fp.unlink(missing_ok=True)
-                    logger.info("Output rimossi (false_positive): %s", eid)
-                    tile_alerts -= 1
+                    logger.info("  Output rimossi (false_positive): %s", eid)
+                    tile_fp_count += 1
                 active_eids.remove(eid)
                 _frozen_del = Path(tile_data_dir) / f"frozen_nbr_{eid}_temp.tif"
                 _frozen_del.unlink(missing_ok=True)
@@ -711,7 +699,7 @@ def process_aoi(aoi, scene_dir=None, stac_client=None, output_dir="output",
                         if _tile_aoi_mask is not None and previous_nbr.shape == _tile_aoi_mask.shape:
                             previous_nbr = np.where(_tile_aoi_mask, previous_nbr, np.nan).astype(np.float32)
                         baseline.save_nbr(previous_nbr, profile, paths["previous"])
-                    logger.info("Baseline aggiornata post false_positive (era frozen %d scene)",
+                    logger.info("  Baseline aggiornata post false_positive (era frozen %d scene)",
                                 _summary.get("n_valid_scenes", 0) if _summary else 0)
                 else:
                     # Ricarica previous_nbr da disco (close_event ha incorporato la cicatrice)
@@ -737,9 +725,10 @@ def process_aoi(aoi, scene_dir=None, stac_client=None, output_dir="output",
             pipeline_state.update_watermark(tile_state, scene.get("datetime", scene.get("date", "")))
             pipeline_state.save_state(tile_state, tile_data_dir)
 
+        _fp_str = f", {tile_fp_count} falsi positivi" if tile_fp_count else ""
         logger.info(
-            "Tile %s completato: %d scene processate, %d nuovi alert (eventi aperti)",
-            tile_id, tile_scenes_processed, tile_alerts,
+            "Tile %s completato: %d scene processate, %d eventi aperti%s",
+            tile_id, tile_scenes_processed, tile_alerts, _fp_str,
         )
         total_scenes_processed += tile_scenes_processed
         total_alerts += tile_alerts
@@ -858,7 +847,7 @@ def main():
     monitoring_end = today  # sempre "oggi"
 
     logger.info("=" * 60)
-    logger.info("MONITORAGGIO INCENDI — avvio operativo")
+    logger.info("MONITORAGGIO INCENDI -- avvio operativo")
     if config.CAMPAIGN_START_DATE is None:
         logger.info("  Modalita': operativa (campaign_start da file per-AOI o today)")
     else:

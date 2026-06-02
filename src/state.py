@@ -78,30 +78,6 @@ def save_state(state, data_dir):
 # Baseline
 # ---------------------------------------------------------------------------
 
-def is_baseline_built(state, required_paths):
-    """True se la baseline risulta costruita E tutti i file raster esistono.
-
-    Parameters
-    ----------
-    state : dict
-        Stato caricato con load_state().
-    required_paths : dict
-        Dict {nome: Path} restituito da baseline.nbr_paths().
-        Controlla almeno 'baseline', 'previous'.
-    """
-    if not state.get("baseline", {}).get("built", False):
-        return False
-    # Verifica fisicamente i file critici della baseline (non previous_nbr:
-    # e' lo stato corrente, non parte della baseline, viene ricostruito
-    # copiando baseline_nbr.tif se mancante)
-    for key in ("baseline",):
-        if key in required_paths and not Path(required_paths[key]).exists():
-            logger.warning("File baseline mancante: %s -- ricostruzione necessaria",
-                           required_paths[key])
-            return False
-    return True
-
-
 def mark_baseline_built(state, n_scenes, coverage_pct, scene_ids):
     """Registra la costruzione della baseline nello stato (in-place).
 

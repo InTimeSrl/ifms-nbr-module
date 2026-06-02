@@ -1,7 +1,7 @@
 """
 events.py -- Gestione eventi di incendio.
 
-Support multi-event per tile/AOI:
+Supporta multi-event per tile/AOI:
 - Ogni cluster bruciato spazialmente separato apre il proprio evento.
 - Nella finestra evento, i pixel burnt vengono assegnati all'evento il cui
   footprint e' piu' prossimo (dilation-based); i pixel orfani aprono nuovi
@@ -359,10 +359,6 @@ def open_event(burnt_mask, dnbr, valid_mask, profile, scene_meta,
     }
     save_index(idx, output_dir)
 
-    logger.info(
-        "Aperto evento %s (tile=%s, alert=%s, %d px iniziali)",
-        event_id, tile, alert_date, int(burnt_mask.sum()),
-    )
     return event_id
 
 
@@ -473,17 +469,13 @@ def mark_closed(event_id, output_dir, reason, closed_date=None):
         idx[event_id]["closed_date"] = closed_date or datetime.utcnow().isoformat()
         save_index(idx, output_dir)
 
-    logger.info("Evento %s marcato come chiuso (%s)", event_id, reason)
-
 
 def purge_event(event_id, output_dir):
-    """Elimina la sidecar folder di un falso positivo ma mantiene la voce
-    nell'indice con status='false_positive'.
+    """Elimina la sidecar folder di un falso positivo.
 
-    La voce viene conservata (non cancellata) per preservare il contatore
-    sequenziale EVT{N}: se la cancelliamo il contatore regredisce e il
-    numero viene riassegnato a un evento nuovo mentre quello vecchio con
-    lo stesso numero e' ancora aperto → doppio EVT6, doppio EVT7, ecc.
+    La voce nell'indice viene mantenuta con status='false_positive'
+    per preservare la sequenza EVT{N} ed evitare riassegnazioni di
+    numeri a eventi ancora aperti.
     """
     sidecar = event_dir(event_id, output_dir)
     if sidecar.exists():

@@ -478,29 +478,6 @@ def load_aoi(path):
 # Gestione CRS / riproiezione
 # ---------------------------------------------------------------------------
 
-def reproject_geometry(geometry, src_crs, dst_crs):
-    """Riproietta una geometria Shapely da src_crs a dst_crs.
-
-    Parameters
-    ----------
-    geometry : shapely.geometry
-        Geometria sorgente.
-    src_crs : str
-        CRS sorgente (es. "EPSG:4326", "EPSG:32634").
-    dst_crs : str
-        CRS destinazione.
-
-    Returns
-    -------
-    shapely.geometry
-        Geometria riproiettata.
-    """
-    if _crs_equal(src_crs, dst_crs):
-        return geometry
-    transformer = Transformer.from_crs(src_crs, dst_crs, always_xy=True)
-    return shapely_transform(transformer.transform, geometry)
-
-
 def reproject_bbox(bbox, src_crs, dst_crs):
     """Riproietta un bounding box da src_crs a dst_crs.
 
@@ -662,6 +639,12 @@ def save_scene_outputs(result, scene, aoi, output_dir, scene_dir=None,
     scene_ts : str, optional
         Timestamp della scena formattato (da events._format_scene_ts); usato
         come prefisso file e nome layer quando event_ids e' fornito.
+    aoi_crop : tuple, optional
+        Finestra di ritaglio (row_off, col_off, nrows, ncols) sul grid tile.
+        Se fornita, i raster di output vengono ritagliati al bounding box AOI.
+    aoi_mask : np.ndarray (bool), optional
+        Maschera pixel interni all'AOI. I pixel esterni vengono azzerati
+        prima del salvataggio.
     """
     from . import postprocess  # local import: postprocess importa data_io
 
@@ -721,7 +704,6 @@ def save_scene_outputs(result, scene, aoi, output_dir, scene_dir=None,
         meta = {
             "event_id": event_ids or "",
             "detection_date": scene.get("datetime", scene.get("date", "")),
-            "satellite": scene_id.split("_")[0] if "_" in scene_id else "",
             "processing_mode": "scene_prelim",
             "aoi_ref": aoi.get("name", ""),
             "tile": tile_id or "",
@@ -739,8 +721,6 @@ def save_scene_outputs(result, scene, aoi, output_dir, scene_dir=None,
             crs=crs_str,
             layer_name=layer_name_prelim,
         )
-
-    logger.info("Output preliminari salvati in %s", out_dir)
 
     # RGB composito Highlight Optimized Natural Color (opzionale)
     if config.PRODUCE_RGB:
