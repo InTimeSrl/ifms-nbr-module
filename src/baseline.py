@@ -16,6 +16,7 @@ import numpy as np
 from . import config
 from . import data_io
 from . import preprocess, indices
+from . import state as pipeline_state
 
 logger = logging.getLogger(__name__)
 
@@ -264,3 +265,112 @@ def build_baseline(aoi, get_scenes_fn, scene_dir=None, data_dir="data"):
         np.median(count[count > 0]) if (count > 0).any() else 0,
     )
     return baseline_nbr, last_profile
+
+
+# ---------------------------------------------------------------------------
+# Costruzione baseline da lista metadati pre-fetched (flusso STAC operativo)
+# ---------------------------------------------------------------------------
+
+def build_baseline_from_metas(aoi, pre_metas, tile_id, tile_data_dir,
+                              scene_dir=None, campaign_start=None):
+    """Costruisce la baseline NBR da una lista di metadati pre-fetched.
+
+    Usato nel flusso STAC operativo dove le scene sono già state
+    recuperate e filtrate prima dell'invocazione (funzione main()).
+
+    Se la baseline è già su disco per questo tile, la salta.
+
+    Parameters
+    ----------
+    aoi : dict
+        AOI dict (da data_io.load_aoi).
+    pre_metas : list[dict]
+        Lista di metadati scena (da data_io.query_stac + _filter_scenes).
+    tile_id : str
+        Tile MGRS (es. T34SFG).
+    tile_data_dir : str
+        Cartella dati persistenti del tile.
+    scene_dir : str o Path, optional
+        Cartella locale dei TIF (None per lettura remota COG).
+    campaign_start : date, optional
+        Data di inizio campagna; salvata nello stato tile se fornita.
+
+    Returns
+    -------
+    bool
+        True se baseline disponibile (già esistente o appena costruita).
+    """
+    paths = nbr_paths(aoi, tile_data_dir)
+    existing, _ = load_nbr(paths["baseline"])
+    if existing is not None:
+        logger.info("Baseline tile %s gia' presente, salto costruzione", tile_id)
+        return True
+
+    tile_metas = [m for m in pre_metas if _tile_id_from_meta(m) == tile_id]
+    if not tile_metas:
+        logger.warning("Nessuna scena pre-campagna per tile %s", tile_id)
+        return False
+
+    logger.info("Costruzione baseline tile %s: %d scene candidate", tile_id, len(tile_metas))
+
+    stack_list = []
+    last_profile = None
+    for meta in tile_metas:
+        result = compute_nbr_from_scene(meta, aoi, scene_dir=scene_dir)
+        if result is None:
+            continue
+        nbr, _nir, _swir, valid_mask, prof = result
+        layer = np.full_like(nbr, np.nan)
+        layer[valid_mask] = nbr[valid_mask]
+        stack_list.append(layer)
+        last_profile = prof
+
+    if len(stack_list) < config.BASELINE_MIN_SCENES:
+        logger.error(
+            "Tile %s: solo %d scene utilizzabili (servono %d) — baseline non costruita",
+            tile_id, len(stack_list), config.BASELINE_MIN_SCENES,
+        )
+        return False
+
+    stack = np.array(stack_list, dtype="float32")
+    pixel_median = _nanmedian_no_allnan_warning(stack, axis=0)
+    pixel_mad = _nanmedian_no_allnan_warning(
+        np.abs(stack - pixel_median[np.newaxis, :, :]), axis=0,
+    )
+    pixel_mad = np.maximum(pixel_mad, config.BASELINE_MAD_FLOOR)
+    threshold = pixel_median - config.BASELINE_MAD_K * pixel_mad
+    anomaly_mask = stack < threshold[np.newaxis, :, :]
+    n_anom = int(np.count_nonzero(anomaly_mask))
+    if n_anom > 0:
+        stack[anomaly_mask] = np.nan
+        logger.info("Filtro MAD tile %s: rimossi %d pixel/scena (%.2f%%)",
+                    tile_id, n_anom, 100.0 * n_anom / stack.size)
+
+    baseline_nbr = _nanmedian_no_allnan_warning(stack, axis=0)
+    count = np.sum(~np.isnan(stack), axis=0).astype("float32")
+    coverage = float((count > 0).mean())
+
+    Path(tile_data_dir).mkdir(parents=True, exist_ok=True)
+    save_nbr(baseline_nbr, last_profile, paths["baseline"])
+    save_nbr(baseline_nbr.copy(), last_profile, paths["previous"])
+    save_nbr(np.zeros_like(baseline_nbr), last_profile, paths["max_dnbr"])
+
+    tile_state = pipeline_state.load_state(tile_data_dir)
+    pipeline_state.mark_baseline_built(
+        tile_state, len(stack_list), coverage * 100,
+        [m["stac_item_id"] for m in tile_metas],
+    )
+    if campaign_start is not None:
+        tile_state["baseline"]["campaign_start"] = str(campaign_start)
+    pipeline_state.save_state(tile_state, tile_data_dir)
+
+    logger.info("Baseline tile %s: %d scene, copertura %.1f%%",
+                tile_id, len(stack_list), coverage * 100)
+    return True
+
+
+def _tile_id_from_meta(meta):
+    """Estrae il tile MGRS dallo stac_item_id (es. S2A_T35SMC_... -> T35SMC)."""
+    scene_id = meta.get("stac_item_id", "")
+    parts = scene_id.split("_")
+    return parts[1] if len(parts) >= 2 else "unknown"

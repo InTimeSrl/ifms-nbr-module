@@ -93,13 +93,14 @@ RBR_THRESHOLD  = 0.10  # coerente con DNBR_THRESHOLD; usato se INDEX_MODE='RBR'
 # Un pixel bruciato e' scuro nel NIR (carbone assorbe) -> riflettanza < 0.20
 # Nubi non mascherate dalla SCL hanno NIR alto (> 0.30) -> escluse
 # Ref: carbone ha riflettanza NIR tipica 0.05-0.15
-NIR_MAX_BURNT = 0.20
+NIR_MAX_BURNT = 0.25
 
-# Soglia minima riflettanza SWIR post-fire per conferma bruciatura.
-# L'acqua assorbe fortemente nel SWIR (riflettanza tipica 0.01-0.06),
-# mentre suolo bruciato/cenere ha SWIR > 0.10.
-# Esclude corpi idrici misclassificati dalla SCL come DARK_AREA (classe 2).
-SWIR_MIN_BURNT = 0.08
+# Soglia minima riflettanza SWIR2 (B12) post-fire per conferma bruciatura.
+# L'acqua assorbe quasi tutto il SWIR2 -> riflettanza tipica 0.005-0.02.
+# Char/suolo bruciato -> SWIR2 tipicamente 0.03-0.10.
+# Filtra corpi idrici che SCL class 6 non copre sempre (bacini stagionali,
+# zone temporaneamente allagate, misclassificazione SCL).
+SWIR2_MIN_BURNT = 0.03
 
 # Classificazione severita USGS (7 classi) -- soglie su dNBR
 # Ref: USGS, Key and Benson (2006)
@@ -157,19 +158,6 @@ MIN_CLUSTER_COMPACTNESS = 0.40   # rapporto minimo (largest_cluster_ha / total_b
                                  # sparsi da ombre nuvole o rumore -> scena ignorata.
                                  # Gate rapido: evita di chiamare find_clusters su scene di puro rumore.
                                  # None = disabilitato.
-
-MIN_CLUSTER_COMPACTNESS_FALLBACK = 0.30  # soglia di compattezza per il controllo integrato (fallback):
-                                         # se la compattezza e' >= questo valore ma < MIN_CLUSTER_COMPACTNESS,
-                                         # la scena viene accettata solo se anche MIN_CLUSTER_DNBR_FALLBACK
-                                         # e' soddisfatto. Permette di recuperare incendi reali con segnale
-                                         # frammentato (es. fronti di fuoco su piu' cluster adiacenti).
-                                         # None = fallback disabilitato.
-
-MIN_CLUSTER_DNBR_FALLBACK = 0.30         # dNBR medio minimo sui pixel bruciati della scena, richiesto
-                                         # quando la compattezza e' nel range [FALLBACK, COMPACTNESS).
-                                         # Valore alto (>= 0.27 = soglia Low severity) garantisce che
-                                         # il segnale spettrale sia coerente con un incendio reale.
-                                         # None = fallback disabilitato.
 
 MAX_INITIAL_MERGE_DISTANCE_KM = 15.0  # distanza massima (km) tra centroidi di cluster della stessa scena
                                        # iniziale per fonderli in un unico evento.

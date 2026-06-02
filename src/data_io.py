@@ -4,17 +4,23 @@ Usa rasterio (GDAL) per raster, fiona per shapefile, JSON per metadati.
 """
 
 import json
+import logging
 import os
 from pathlib import Path
 
 import fiona
+import numpy as np
 import rasterio
+import rasterio.windows as _rwin
+from pystac_client import Client
 from pyproj import Transformer
 from rasterio.windows import from_bounds, Window
 from shapely.geometry import shape
 from shapely.ops import transform as shapely_transform
 
 from . import config
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -557,3 +563,187 @@ def get_aoi_bbox_raster(aoi, raster_crs):
 def _crs_equal(crs_a, crs_b):
     """Confronto normalizzato tra stringhe CRS (case-insensitive, senza spazi)."""
     return crs_a.upper().replace(" ", "") == crs_b.upper().replace(" ", "")
+
+
+# ---------------------------------------------------------------------------
+# STAC: query catalogo e conversione metadati
+# ---------------------------------------------------------------------------
+
+def _stac_item_to_meta(item):
+    """Converte un STAC Item in dict metadati compatibile con la pipeline."""
+    props = item.properties
+    assets = {}
+    for stac_key, band_name in config.BANDS.items():
+        if stac_key in item.assets:
+            asset = item.assets[stac_key]
+            extra = {}
+            if hasattr(asset, "extra_fields"):
+                rb_list = asset.extra_fields.get("raster:bands", [])
+                if rb_list:
+                    extra["scale"] = rb_list[0].get("scale")
+                    extra["offset"] = rb_list[0].get("offset")
+            assets[stac_key] = {"href": asset.href, "band_name": band_name, **extra}
+    return {
+        "stac_item_id": item.id,
+        "datetime": props.get("datetime", ""),
+        "platform": props.get("platform", ""),
+        "proj_code": "EPSG:%s" % props.get("proj:epsg", ""),
+        "eo_cloud_cover": props.get("eo:cloud_cover"),
+        "s2_processing_baseline": props.get("s2:processing_baseline", "99.99"),
+        "bbox": list(item.bbox) if item.bbox else [],
+        "assets": assets,
+    }
+
+
+def query_stac(bbox_wgs84, date_from, date_to, stac_url, collection,
+               max_items=2000):
+    """Esegue una query STAC e restituisce la lista di metadati scena."""
+    catalog = Client.open(stac_url)
+    date_range = "%s/%s" % (date_from, date_to)
+    logger.info("Query STAC: bbox=%s  date=%s", bbox_wgs84, date_range)
+    results = catalog.search(
+        collections=[collection],
+        bbox=list(bbox_wgs84),
+        datetime=date_range,
+        max_items=max_items,
+    )
+    items = list(results.items())
+    logger.info("STAC: trovate %d scene", len(items))
+    return [_stac_item_to_meta(it) for it in items]
+
+
+def _get_scenes_stac(aoi, stac_client, date_from=None):
+    """Recupera scene da un catalogo STAC.
+
+    TODO: implementare quando il server STAC interno sara' disponibile.
+    """
+    raise NotImplementedError("Query STAC non ancora implementata")
+
+
+def get_scenes(aoi, scene_dir=None, stac_client=None, date_from=None):
+    """Recupera le scene disponibili per un'AOI (locale o STAC).
+
+    Una tra scene_dir e stac_client deve essere fornita.
+    """
+    if scene_dir is not None:
+        return list_scenes(scene_dir)
+    elif stac_client is not None:
+        return _get_scenes_stac(aoi, stac_client, date_from)
+    else:
+        raise ValueError("Specificare scene_dir (locale) o stac_client (remoto)")
+
+
+# ---------------------------------------------------------------------------
+# Salvataggio output scena
+# ---------------------------------------------------------------------------
+
+def save_scene_outputs(result, scene, aoi, output_dir, scene_dir=None,
+                       event_ids=None, tile_id=None, scene_ts=None,
+                       aoi_crop=None, aoi_mask=None):
+    """Salva i prodotti preliminari di una scena: dNBR, severity, GeoPackage e
+    RGB opzionale (suffisso ``_prelim``; perimetrazione finale da ``end_event``).
+
+    Parameters
+    ----------
+    result : dict
+        Output di process_scene (con fire_detected=True).
+    scene : dict
+        Metadati della scena.
+    aoi : dict
+        AOI dict.
+    output_dir : str
+        Cartella radice output.
+    scene_dir : str o Path, optional
+        Cartella locale dei TIF (necessaria per produrre RGB).
+    event_ids : str, optional
+        Event ID toccato dalla scena; usato come nome cartella e layer GPKG.
+    tile_id : str, optional
+        Tile MGRS (es. T35SMC), salvato come proprieta' nel GeoPackage.
+    scene_ts : str, optional
+        Timestamp della scena formattato (da events._format_scene_ts); usato
+        come prefisso file e nome layer quando event_ids e' fornito.
+    """
+    from . import postprocess  # local import: postprocess importa data_io
+
+    scene_id = scene["stac_item_id"]
+    if event_ids and scene_ts:
+        # Sidecar folder condiviso per tutte le scene dell'evento.
+        evt_part = event_ids.split("_")[-1] if "_EVT" in event_ids else event_ids
+        out_dir = Path(output_dir) / event_ids
+        gpkg_path = Path(output_dir) / f"{event_ids}.gpkg"
+        raster_pfx = scene_ts
+        layer_name_prelim = f"{scene_ts}_burnt_prelim_{evt_part}"
+    else:
+        out_dir = Path(output_dir) / scene_id
+        gpkg_path = out_dir / f"{scene_id}_burnt_prelim.gpkg"
+        raster_pfx = scene_id
+        layer_name_prelim = "burnt_prelim"
+    profile = result["profile"]
+    _dnbr = result.get("dnbr")
+    _severity = result.get("severity")
+
+    # Azzera pixel fuori AOI (nodata): applica maschera PRIMA del crop
+    if aoi_mask is not None:
+        if _dnbr is not None and _dnbr.shape == aoi_mask.shape:
+            _dnbr = np.where(aoi_mask, _dnbr, np.nan).astype(np.float32)
+        if _severity is not None and _severity.shape == aoi_mask.shape:
+            _severity = np.where(aoi_mask, _severity, 0).astype(_severity.dtype)
+
+    # Ritaglia al bounding box dell'AOI sul grid tile
+    if aoi_crop is not None:
+        _r0, _c0, _nrows, _ncols = aoi_crop
+        _win = _rwin.Window(_c0, _r0, _ncols, _nrows)
+        _crop_tr = _rwin.transform(_win, profile["transform"])
+        profile = {**profile, "height": _nrows, "width": _ncols, "transform": _crop_tr}
+        if _dnbr is not None:
+            _dnbr = _dnbr[_r0:_r0 + _nrows, _c0:_c0 + _ncols]
+        if _severity is not None:
+            _severity = _severity[_r0:_r0 + _nrows, _c0:_c0 + _ncols]
+
+    # dNBR preliminare
+    write_geotiff(
+        _dnbr, profile,
+        out_dir / f"{raster_pfx}_dNBR.tif",
+        dtype="float32",
+    )
+
+    # Severity raster preliminare
+    if _severity is not None:
+        write_geotiff(
+            _severity, profile,
+            out_dir / f"{raster_pfx}_severity_prelim.tif",
+            dtype="uint8",
+            nodata=0,
+        )
+
+    # Poligoni GeoPackage preliminari (CRS nativo)
+    if _severity is not None and _dnbr is not None:
+        meta = {
+            "event_id": event_ids or "",
+            "detection_date": scene.get("datetime", scene.get("date", "")),
+            "satellite": scene_id.split("_")[0] if "_" in scene_id else "",
+            "processing_mode": "scene_prelim",
+            "aoi_ref": aoi.get("name", ""),
+            "tile": tile_id or "",
+            "cloud_cover_pct": scene.get("eo_cloud_cover"),
+            "index_mode": config.INDEX_MODE,
+            "index_threshold": config.RBR_THRESHOLD if config.INDEX_MODE == "RBR" else config.DNBR_THRESHOLD,
+        }
+        features = postprocess.vectorize_by_severity(
+            _severity, _dnbr, profile, meta=meta,
+        )
+        crs_str = str(profile.get("crs", "")) or None
+        write_geopackage(
+            features,
+            gpkg_path,
+            crs=crs_str,
+            layer_name=layer_name_prelim,
+        )
+
+    logger.info("Output preliminari salvati in %s", out_dir)
+
+    # RGB composito Highlight Optimized Natural Color (opzionale)
+    if config.PRODUCE_RGB:
+        postprocess.save_rgb_composite(scene, aoi, scene_dir, out_dir)
+
+    return out_dir
