@@ -195,6 +195,7 @@ def process_aoi(aoi, scene_dir=None, stac_client=None, output_dir="output",
 
     total_scenes_processed = 0
     total_alerts = 0
+    total_fp_count = 0
     processed_tiles = []
 
     for tile_id in tile_ids:
@@ -732,17 +733,27 @@ def process_aoi(aoi, scene_dir=None, stac_client=None, output_dir="output",
         )
         total_scenes_processed += tile_scenes_processed
         total_alerts += tile_alerts
+        total_fp_count += tile_fp_count
         processed_tiles.append(tile_id)
 
+    _aoi_confirmed = total_alerts - total_fp_count
+    _aoi_fp_str = f", {total_fp_count} falsi positivi" if total_fp_count else ""
+    # Conta eventi ancora aperti su tutti i tile al termine del run
+    _total_open = sum(
+        len(events.list_active_events(str(Path(output_dir) / tid), tile=tid, aoi=aoi_name))
+        for tid in processed_tiles
+    )
+    _open_str = f", {_total_open} eventi in corso" if _total_open else ""
     logger.info(
-        "=== AOI '%s' completata: %d tile, %d scene processate, %d alert ===",
-        aoi_name, len(processed_tiles), total_scenes_processed, total_alerts,
+        "=== AOI '%s' completata: %d tile, %d scene processate, %d alert confermati%s%s ===",
+        aoi_name, len(processed_tiles), total_scenes_processed, _aoi_confirmed, _aoi_fp_str, _open_str,
     )
     return {
         "aoi": aoi_name,
         "tiles": processed_tiles,
         "scenes_processed": total_scenes_processed,
-        "alerts": total_alerts,
+        "alerts": _aoi_confirmed,
+        "open_events": _total_open,
     }
 
 

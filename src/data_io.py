@@ -1,6 +1,21 @@
 """
 data_io.py -- I/O scene Sentinel-2, AOI, output raster/vector.
 Usa rasterio (GDAL) per raster, fiona per shapefile, JSON per metadati.
+
+Parallelismo AOI (opzione consigliata):
+    Le AOI sono completamente indipendenti su disco (data_dir e output_dir
+    separate per nome AOI). Per processarle in parallelo senza modifiche al
+    codice e' sufficiente lanciare processi OS separati usando il flag --aoi:
+
+        # Linux: avvia N AOI in parallelo, ognuna con il proprio log
+        python run.py --aoi AOI_A > output_AOI_A.log 2>&1 &
+        python run.py --aoi AOI_B > output_AOI_B.log 2>&1 &
+
+    Nessun lock necessario: pipeline_state.json, events_index.json e i raster
+    NBR sono tutti per-tile/per-AOI.
+    N.B.: Possibile collo di bottiglia sulla
+    banda di rete verso il provider STAC/COG: piu' di 3-4 AOI
+    simultanee potrebbero portare a saturazione la connessione o incorrere in rate limiting.
 """
 
 import json

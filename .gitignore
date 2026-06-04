@@ -23,6 +23,7 @@ sample_*.py
 *.html
 *.md
 note_*.md
+lancio.txt
 
 # === File di progetto QGIS ===
 *.qgs
