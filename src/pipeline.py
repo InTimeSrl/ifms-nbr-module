@@ -726,10 +726,11 @@ def process_aoi(aoi, scene_dir=None, stac_client=None, output_dir="output",
             pipeline_state.update_watermark(tile_state, scene.get("datetime", scene.get("date", "")))
             pipeline_state.save_state(tile_state, tile_data_dir)
 
+        _tile_confirmed = tile_alerts - tile_fp_count
         _fp_str = f", {tile_fp_count} falsi positivi" if tile_fp_count else ""
         logger.info(
-            "Tile %s completato: %d scene processate, %d eventi aperti%s",
-            tile_id, tile_scenes_processed, tile_alerts, _fp_str,
+            "Tile %s completato: %d scene processate, %d alert confermati%s",
+            tile_id, tile_scenes_processed, _tile_confirmed, _fp_str,
         )
         total_scenes_processed += tile_scenes_processed
         total_alerts += tile_alerts
@@ -986,11 +987,6 @@ def main():
                 scenes=post_metas,
                 output_dir=output_dir,
                 data_dir=data_dir,
-            )
-            logger.info(
-                "    Completato: %d scene processate, %d alert",
-                result.get("scenes_processed", 0),
-                result.get("alerts", 0),
             )
         except Exception as exc:
             logger.error("    Errore pipeline per AOI '%s': %s", aoi_name, exc,

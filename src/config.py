@@ -1,6 +1,6 @@
 """
-config.py -- Parametri e soglie dell'algoritmo NBR.
-Valori iniziali da letteratura; calibrazione su dati Chios/Arta vs EFFIS.
+config.py -- Parametri e soglie dell'algoritmo FireDetection.
+Valori iniziali da letteratura; calibrazione su dati EMSR Copernicus & EFFIS.
 
 Organizzazione per area di azione (ordine di esecuzione nella pipeline):
   1. INPUT              -- bande richieste, nodata, versione prodotto
@@ -71,9 +71,9 @@ SCENE_VALID_SCL_PCT = 70.0  # % minima pixel SCL validi sull'AOI per considerare
 
 # Indice da usare: "dNBR" (default) oppure "RBR" (aree eterogenee)
 # Nota: in modalita' RBR la classificazione severity (SEVERITY_CLASSES) usa comunque
-# le stesse soglie calibrate su dNBR (Key & Benson 2006). I valori RBR sono numericamente
-# simili al dNBR su vegetazione densa, ma possono divergere su vegetazione sparsa:
-# la severity in RBR mode e' un'approssimazione, non una classificazione calibrata su RBR.
+# le stesse soglie calibrate su dNBR (Key & Benson 2006). Su vegetazione sparsa
+# (NBR_pre ≈ 0) RBR ≈ dNBR (denominatore ≈ 1); su vegetazione densa (NBR_pre ≈ 0.5-0.7)
+# RBR < dNBR (denominatore > 1): la severity tende a essere sottostimata rispetto a dNBR.
 INDEX_MODE = "dNBR"
 
 # Soglie di rilevamento -- usate in base a INDEX_MODE
@@ -173,7 +173,7 @@ FOOTPRINT_CLOSING_M  = 80        # raggio del closing morfologico per il perimet
 FOOTPRINT_EXPAND_M   = 30        # espansione netta del perimetro footprint dopo il closing (metri)
 FOOTPRINT_SIMPLIFY_M =  1        # tolleranza Douglas-Peucker per la semplificazione del perimetro (metri)
 
-MIN_PATCH_PIXELS = 25            # rimuovi patch isolate < 25 pixel (< 1 ha a 20 m) dal raster finale
+MIN_PATCH_PIXELS = 25            # rimuovi patch isolate < 25 pixel (~10 ha)
 HOLE_FILL_PIXELS = 500           # riempi buchi < 500 pixel (~20 ha) nei poligoni finali
 
 # ===========================================================================
@@ -208,4 +208,4 @@ FORCE_REPROCESS = False
 # Formula L2A: cbrt(0.6 * riflettanza) per B4, B3, B2
 # Ref: Marko Repse, Sentinel Hub Custom Scripts
 #      https://sentinel-hub.github.io/custom-scripts/sentinel-2/highlight_optimized_natural_color/
-PRODUCE_RGB = True
+PRODUCE_RGB = False
