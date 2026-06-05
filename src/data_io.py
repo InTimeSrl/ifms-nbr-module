@@ -2,6 +2,16 @@
 data_io.py -- I/O scene Sentinel-2, AOI, output raster/vector.
 Usa rasterio (GDAL) per raster, fiona per shapefile, JSON per metadati.
 
+Cartella di output:
+    Il percorso radice degli output si imposta tramite l'argomento --output-root
+    di run.py (default: "output/", relativa alla CWD del progetto).
+    Per cambiare la cartella di default in modo permanente, modificare in
+    src/pipeline.py la riga:
+        "--output-root", default="output",
+    La struttura creata automaticamente e':
+        <output-root>/<nome_aoi>/data/      <- baseline_nbr, previous_nbr, pipeline_state.json
+        <output-root>/<nome_aoi>/products/  <- GeoPackage, severity_final.tif, ...
+
 Parallelismo AOI (opzione consigliata):
     Le AOI sono completamente indipendenti su disco (data_dir e output_dir
     separate per nome AOI). Per processarle in parallelo senza modifiche al

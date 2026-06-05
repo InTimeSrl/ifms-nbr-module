@@ -810,15 +810,8 @@ def main():
     _console_handler = logging.StreamHandler(_utf8_stdout)
     _console_handler.setFormatter(_fmt)
 
-    # File handler: output/logs/run_<timestamp>.log (UTF-8, un file per lancio)
-    _log_dir = Path("output") / "logs"
-    _log_dir.mkdir(parents=True, exist_ok=True)
-    _log_path = _log_dir / f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-    _file_handler = logging.FileHandler(str(_log_path), encoding="utf-8")
-    _file_handler.setFormatter(_fmt)
-
-    logging.basicConfig(level=logging.INFO, handlers=[_console_handler, _file_handler])
-    logger.info("Log salvato in: %s", _log_path)
+    # Setup logging console-only in anticipo (prima del parse args)
+    logging.basicConfig(level=logging.INFO, handlers=[_console_handler])
 
     p = argparse.ArgumentParser(
         description="Monitoraggio aree bruciate Sentinel-2 — lancio operativo"
@@ -844,6 +837,9 @@ def main():
         help="Nome collection STAC",
     )
     args = p.parse_args()
+
+    # Timestamp condiviso per i nomi dei log per-AOI
+    _run_ts = datetime.now().strftime('%Y%m%d_%H%M%S')
 
     # --- Date campagna ---
     # CAMPAIGN_START_DATE = None  → campagna parte da oggi (solo baseline)
@@ -885,8 +881,17 @@ def main():
     had_failures = False
 
     for aoi_name, shp_path in aoi_map.items():
+        # Log separato per AOI: logs/run_<timestamp>_<aoi_name>.log
+        _aoi_log_dir = Path(args.output_root) / "logs"
+        _aoi_log_dir.mkdir(parents=True, exist_ok=True)
+        _aoi_log_path = _aoi_log_dir / f"run_{_run_ts}_{aoi_name}.log"
+        _aoi_fh = logging.FileHandler(str(_aoi_log_path), encoding="utf-8")
+        _aoi_fh.setFormatter(_fmt)
+        logging.getLogger().addHandler(_aoi_fh)
+
         logger.info("")
         logger.info(">>> AOI: %s", aoi_name)
+        logger.info("    Log AOI: %s", _aoi_log_path)
 
         aoi = data_io.load_aoi(shp_path)
         aoi["name"] = aoi_name
@@ -992,6 +997,11 @@ def main():
             logger.error("    Errore pipeline per AOI '%s': %s", aoi_name, exc,
                          exc_info=True)
             had_failures = True
+
+        finally:
+            # Chiudi e rimuovi il file handler per-AOI
+            logging.getLogger().removeHandler(_aoi_fh)
+            _aoi_fh.close()
 
     if had_failures:
         sys.exit(1)
