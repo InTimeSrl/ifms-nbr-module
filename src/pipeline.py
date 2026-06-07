@@ -835,8 +835,8 @@ def main():
         description="Monitoraggio aree bruciate Sentinel-2 — lancio operativo"
     )
     p.add_argument(
-        "--aoi", default=None,
-        help="Nome sottocartella in AOIs/ da processare (default: tutte)",
+        "--aoi", default=None, nargs='+',
+        help="Nome/i sottocartella/e in AOIs/ da processare (es: --aoi Chios Attica). Default: tutte",
     )
     p.add_argument(
         "--aois-root", default="AOIs",
@@ -888,11 +888,12 @@ def main():
         sys.exit(1)
 
     if args.aoi:
-        if args.aoi not in aoi_map:
-            logger.error("AOI '%s' non trovata in '%s'. Disponibili: %s",
-                         args.aoi, args.aois_root, ", ".join(aoi_map))
+        missing = [a for a in args.aoi if a not in aoi_map]
+        if missing:
+            logger.error("AOI non trovate in '%s': %s. Disponibili: %s",
+                         args.aois_root, ", ".join(missing), ", ".join(aoi_map))
             sys.exit(1)
-        aoi_map = {args.aoi: aoi_map[args.aoi]}
+        aoi_map = {a: aoi_map[a] for a in args.aoi}
 
     logger.info("AOI da processare: %s", ", ".join(aoi_map))
 
