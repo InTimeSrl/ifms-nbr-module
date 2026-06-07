@@ -10,7 +10,7 @@ Usage:
     python run.py --aoi Chios Kos          # multiple AOIs
     python run.py --aois-root /path/to/AOIs --output-root /path/to/output
 
-Key parameters (src_v8_ENG_version_standby/config.py):
+Key parameters (src/config.py):
     CAMPAIGN_START_DATE = None            # campaign starts today (baseline only)
     CAMPAIGN_START_DATE = "2024-07-01"    # historical monitoring from that date
 """
@@ -20,7 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from src_v8_ENG_version_standby.pipeline import main
+from src.pipeline import main
 
 if __name__ == "__main__":
     main()

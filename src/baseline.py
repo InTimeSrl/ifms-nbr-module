@@ -3,7 +3,7 @@ baseline.py -- Pre-campaign retrospective baseline NBR.
 
 One-shot: retrieves scenes from the look-back window, filters them,
 computes NBR, builds a median composite with MAD anomaly filter, and
-saves to disk (baseline_nbr, previous_nbr, max_dnbr).
+saves to disk (baseline_nbr, previous_nbr).
 """
 
 import logging
@@ -45,14 +45,13 @@ def nbr_paths(aoi, data_dir="data"):
     Returns
     -------
     dict
-        {"baseline": Path, "previous": Path, "max_dnbr": Path}
+        {"baseline": Path, "previous": Path}
     """
     d = Path(data_dir)
     d.mkdir(parents=True, exist_ok=True)
     return {
         "baseline": d / "baseline_nbr.tif",
         "previous": d / "previous_nbr.tif",
-        "max_dnbr": d / "max_dnbr.tif",
     }
 
 
@@ -135,7 +134,7 @@ def build_baseline(aoi, get_scenes_fn, scene_dir=None, data_dir="data"):
 
     Retrieves scenes from the pre-campaign look-back window, builds a
     median composite with MAD anomaly filter, and saves baseline_nbr.tif.
-    Initialises previous_nbr and max_dnbr.
+    Initialises previous_nbr.
 
     Parameters
     ----------
@@ -255,9 +254,6 @@ def build_baseline(aoi, get_scenes_fn, scene_dir=None, data_dir="data"):
     # previous_nbr = baseline_nbr (green reference)
     save_nbr(baseline_nbr.copy(), last_profile, paths["previous"])
 
-    # max_dnbr = 0 (no damage recorded yet)
-    save_nbr(np.zeros_like(baseline_nbr), last_profile, paths["max_dnbr"])
-
     logger.info(
         "Baseline complete: %d scenes, median observations/pixel: %.0f",
         len(stack_list),
@@ -352,7 +348,6 @@ def build_baseline_from_metas(aoi, pre_metas, tile_id, tile_data_dir,
     Path(tile_data_dir).mkdir(parents=True, exist_ok=True)
     save_nbr(baseline_nbr, last_profile, paths["baseline"])
     save_nbr(baseline_nbr.copy(), last_profile, paths["previous"])
-    save_nbr(np.zeros_like(baseline_nbr), last_profile, paths["max_dnbr"])
 
     tile_state = pipeline_state.load_state(tile_data_dir)
     pipeline_state.mark_baseline_built(
