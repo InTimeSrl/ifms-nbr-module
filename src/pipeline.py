@@ -1,16 +1,16 @@
 """
-pipeline.py -- Orchestratore del monitoraggio continuo aree bruciate.
+pipeline.py -- Continuous burned area monitoring orchestrator.
 
-Logica per evento:
-  - baseline_nbr  : composite pre-campagna (fisso), da baseline.py
-  - previous_nbr  : inizia = baseline, evolve a ogni scena valida (anche burnt
-                    sui pixel non bruciati)
-  - eventi        : gestiti da events.py. Ogni cluster bruciato >= soglia apre
-                    un evento o aggiorna un evento attivo (overlap di bbox).
-                    Ogni scena valida contribuisce a obs_count degli eventi
-                    attivi del tile (e a burnt_count su quelli toccati).
-  - chiusura      : end_event.close_event(...) quando un evento raggiunge
-                    EVENT_WINDOW_SCENES o EVENT_TIMEOUT_DAYS.
+Event logic:
+  - baseline_nbr  : pre-campaign composite (fixed), from baseline.py
+  - previous_nbr  : starts = baseline, evolves at each valid scene (including
+                    burnt pixels on non-burnt areas)
+  - events        : managed by events.py. Each burnt cluster >= threshold opens
+                    an event or updates an active event (bbox overlap).
+                    Each valid scene contributes to obs_count of active tile
+                    events (and to burnt_count on those touched).
+  - closure       : end_event.close_event(...) when an event reaches
+                    EVENT_WINDOW_SCENES or EVENT_TIMEOUT_DAYS.
 """
 
 import argparse
@@ -40,35 +40,35 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Filtri pre-processing a livello di scena
+# Scene-level pre-processing filters
 # ---------------------------------------------------------------------------
 
 def _filter_scenes(scenes, tile_id=""):
-    """Filtra scene per qualita': cloud_cover e processing_baseline.
+    """Filter scenes by quality: cloud_cover and processing_baseline.
 
     Parameters
     ----------
     scenes : list[dict]
-        Scene candidate (gia' filtrate per data dal chiamante).
+        Candidate scenes (already date-filtered by caller).
     tile_id : str, optional
-        Usato solo nel messaggio di log.
+        Used only in the log message.
 
     Returns
     -------
     list[dict]
-        Scene valide da processare.
+        Valid scenes to process.
     """
     valid = []
     for scene in scenes:
         scene_id = scene["stac_item_id"]
 
-        # Cloud cover troppo alta? (supporta sia "eo_cloud_cover" che "cloud_cover")
+        # Cloud cover too high? (supports both "eo_cloud_cover" and "cloud_cover")
         cc = scene.get("eo_cloud_cover") if "eo_cloud_cover" in scene else scene.get("cloud_cover")
         if cc is not None and cc > config.MAX_CLOUD_COVER_PCT:
             logger.debug("Skip %s: cloud_cover=%.1f%%", scene_id, cc)
             continue
 
-        # Processing baseline troppo vecchia? (supporta sia "s2_processing_baseline" che "processing_baseline")
+        # Processing baseline too old? (supports both "s2_processing_baseline" and "processing_baseline")
         pb = scene.get("s2_processing_baseline") if "s2_processing_baseline" in scene else scene.get("processing_baseline", "99.99")
         if pb < config.MIN_PROCESSING_BASELINE:
             logger.debug("Skip %s: baseline=%s", scene_id, pb)
@@ -77,54 +77,54 @@ def _filter_scenes(scenes, tile_id=""):
         valid.append(scene)
 
     logger.info(
-        "Tile %s: %d scene candidate, %d valide per qualita'",
+        "Tile %s: %d candidate scenes, %d valid for quality",
         tile_id, len(scenes), len(valid),
     )
     return valid
 
 
 def _get_tile_id(scene):
-    """Estrae il tile MGRS dallo STAC item id (es. S2A_T35SMC_... -> T35SMC)."""
+    """Extract the MGRS tile from the STAC item id (e.g. S2A_T35SMC_... -> T35SMC)."""
     scene_id = scene.get("stac_item_id", "")
     parts = scene_id.split("_")
     return parts[1] if len(parts) >= 2 else "unknown"
 
 
 # ---------------------------------------------------------------------------
-# Pipeline principale
+# Main pipeline
 # ---------------------------------------------------------------------------
 
 def process_scene(scene, aoi, scene_dir=None, previous_nbr=None):
-    """Processa una singola scena per un'AOI.
+    """Process a single scene for an AOI.
 
     Parameters
     ----------
     scene : dict
-        Metadati della scena.
+        Scene metadata.
     aoi : dict
-        AOI dict (da data_io.load_aoi).
-    scene_dir : str o Path, optional
-        Cartella locale dei TIF. Se None, legge da remoto (COG via VFS).
+        AOI dict (from data_io.load_aoi).
+    scene_dir : str or Path, optional
+        Local TIF folder. If None, reads remotely (COG via VFS).
     previous_nbr : np.ndarray
-        NBR dell'ultima scena "pulita" (baseline operativa).
+        NBR of the last 'clean' scene (operational baseline).
 
     Returns
     -------
-    result : dict o None
-        - "nbr": array NBR corrente
-        - "valid_mask": maschera pixel validi
-        - "profile": profilo rasterio
-        - "dnbr": array dNBR (previous - current)
+    result : dict or None
+        - "nbr": current NBR array
+        - "valid_mask": valid pixel mask
+        - "profile": rasterio profile
+        - "dnbr": dNBR array (previous - current)
         - "fire_detected": bool
-        - "severity": array classificazione (solo se fire_detected)
+        - "severity": classification array (only if fire_detected)
 
-        None se la scena e' priva di pixel validi (caso degenere).
+        None if the scene has no valid pixels (degenerate case).
     """
     scene_id = scene["stac_item_id"]
 
     result = baseline.compute_nbr_from_scene(scene, aoi, scene_dir)
     if result is None:
-        logger.warning("Scena %s: nessun pixel valido, skip", scene_id)
+        logger.warning("Scene %s: no valid pixels, skip", scene_id)
         return None
 
     nbr, nir, swir, valid_mask, profile = result
@@ -139,9 +139,9 @@ def process_scene(scene, aoi, scene_dir=None, previous_nbr=None):
         _index_label = "dNBR"
         _threshold = config.DNBR_THRESHOLD
 
-    out["dnbr"] = delta  # chiave fissa per compatibilita' output; contiene dNBR o RBR
+    out["dnbr"] = delta  # fixed key for output compatibility; contains dNBR or RBR
 
-    # Tripla soglia: indice alto + NIR basso + SWIR2 minimo (filtra acqua non coperta da SCL).
+    # Triple threshold: high index + low NIR + min SWIR2 (filters water not covered by SCL).
     burnt_mask = (delta > _threshold) & (nir < config.NIR_MAX_BURNT) & (swir > config.SWIR2_MIN_BURNT) & valid_mask
     out["burnt_mask"] = burnt_mask
 
@@ -171,26 +171,26 @@ def process_scene(scene, aoi, scene_dir=None, previous_nbr=None):
 
 def process_aoi(aoi, scene_dir=None, stac_client=None, output_dir="output",
                 data_dir="data", scenes=None):
-    """Esegue la pipeline completa per un'AOI: baseline, watermark, loop scene,
-    gestione eventi, output raster/vettore per ogni tile MGRS rilevato.
+    """Run the full pipeline for an AOI: baseline, watermark, scene loop,
+    event management, raster/vector output for each detected MGRS tile.
 
     Parameters
     ----------
     scenes : list[dict], optional
-        Scene pre-caricate (es. da query STAC esterna). Se None, vengono
-        recuperate tramite get_scenes().
+        Pre-loaded scenes (e.g. from external STAC query). If None,
+        retrieved via get_scenes().
     """
     aoi_name = aoi["name"]
-    logger.info("=== Inizio processamento AOI: %s ===", aoi_name)
+    logger.info("=== Starting AOI processing: %s ===", aoi_name)
 
-    # Recupera tutte le scene e determina i tile da processare.
+    # Retrieve all scenes and determine the tiles to process.
     all_scenes = scenes if scenes is not None else data_io.get_scenes(
         aoi, scene_dir=scene_dir, stac_client=stac_client
     )
     tile_ids = sorted({_get_tile_id(s) for s in all_scenes if _get_tile_id(s) != "unknown"})
 
     if not tile_ids:
-        logger.info("AOI '%s': nessun tile valido trovato nelle scene", aoi_name)
+        logger.info("AOI '%s': no valid tiles found in scenes", aoi_name)
         return {"aoi": aoi_name, "scenes_processed": 0, "alerts": 0, "tiles": []}
 
     total_scenes_processed = 0
@@ -203,19 +203,19 @@ def process_aoi(aoi, scene_dir=None, stac_client=None, output_dir="output",
         tile_output_dir = str(Path(output_dir) / tile_id)
         logger.info("--- AOI '%s' | Tile %s ---", aoi_name, tile_id)
 
-        # Watermark: datetime ISO 8601 dell'ultima scena processata.
-        # Solo scene con datetime > watermark vengono incluse nel loop.
+        # Watermark: ISO 8601 datetime of the last processed scene.
+        # Only scenes with datetime > watermark are included in the loop.
         tile_state = pipeline_state.load_state(tile_data_dir)
         watermark = pipeline_state.get_watermark(tile_state)
         if watermark:
-            logger.info("Tile %s: watermark=%s (ultime scene gia' processate)",
+            logger.info("Tile %s: watermark=%s (last scenes already processed)",
                         tile_id, watermark)
 
         paths = baseline.nbr_paths(aoi, tile_data_dir)
         baseline_nbr, baseline_profile = baseline.load_nbr(paths["baseline"])
         previous_nbr, _ = baseline.load_nbr(paths["previous"])
 
-        # Baseline assente: costruiscila retrospettivamente per tile.
+        # Baseline absent: build it retrospectively for the tile.
         if baseline_nbr is None:
             def _get_scenes_for_tile(date_from=None, _tile_id=tile_id):
                 scenes = data_io.get_scenes(
@@ -229,13 +229,13 @@ def process_aoi(aoi, scene_dir=None, stac_client=None, output_dir="output",
             )
             previous_nbr = baseline_nbr.copy()
 
-        # Se previous_nbr non esiste (caso anomalo), inizializza da baseline
+        # If previous_nbr does not exist (anomalous case), initialize from baseline
         if previous_nbr is None:
             previous_nbr = baseline_nbr.copy()
             baseline.save_nbr(previous_nbr, baseline_profile, paths["previous"])
 
-        # Maschera AOI rasterizzata sul grid tile (CRS riproiettato): limita la
-        # pipeline ai pixel interni all'AOI per tutta la durata del loop scene.
+        # Rasterized AOI mask on the tile grid (reprojected CRS): restricts the
+        # pipeline to pixels inside the AOI for the entire scene loop.
         _tile_aoi_mask = None
         _aoi_geom_raw = aoi.get("geometry")
         if _aoi_geom_raw is not None and baseline_profile is not None:
@@ -255,12 +255,12 @@ def process_aoi(aoi, scene_dir=None, stac_client=None, output_dir="output",
                     invert=True,   # True = dentro AOI
                     out_shape=(baseline_profile["height"], baseline_profile["width"]),
                 )
-                logger.info("Tile %s: maschera AOI applicata (%.1f%% pixel inclusi)",
+                logger.info("Tile %s: AOI mask applied (%.1f%% pixels included)",
                             tile_id, 100.0 * _tile_aoi_mask.sum() / _tile_aoi_mask.size)
             except Exception as _e:
-                logger.warning("Tile %s: maschera AOI non calcolata: %s", tile_id, _e)
+                logger.warning("Tile %s: AOI mask could not be computed: %s", tile_id, _e)
 
-        # Bounding box AOI sul grid tile: ritaglio degli output.
+        # AOI bounding box on the tile grid: output cropping.
         _aoi_crop_window = None
         if _tile_aoi_mask is not None:
             _rows_in = np.where(_tile_aoi_mask.any(axis=1))[0]
@@ -270,7 +270,7 @@ def process_aoi(aoi, scene_dir=None, stac_client=None, output_dir="output",
                 _cc0, _cc1 = int(_cols_in[0]), int(_cols_in[-1]) + 1
                 _aoi_crop_window = (_cr0, _cc0, _cr1 - _cr0, _cc1 - _cc0)
 
-        # Azzera pixel fuori AOI a NaN nella baseline (in memoria e su disco).
+        # Zero out pixels outside AOI to NaN in the baseline (in memory and on disk).
         if _tile_aoi_mask is not None and baseline_profile is not None:
             if baseline_nbr is not None and baseline_nbr.shape == _tile_aoi_mask.shape:
                 baseline_nbr = np.where(_tile_aoi_mask, baseline_nbr, np.nan).astype(np.float32)
@@ -279,7 +279,7 @@ def process_aoi(aoi, scene_dir=None, stac_client=None, output_dir="output",
                 previous_nbr = np.where(_tile_aoi_mask, previous_nbr, np.nan).astype(np.float32)
                 baseline.save_nbr(previous_nbr, baseline_profile, paths["previous"])
 
-        # Resume dopo crash: riapplica il baseline pre-fire congelato per eventi attivi.
+        # Resume after crash: reapply the frozen pre-fire baseline for active events.
         if previous_nbr is not None:
             _init_active_eids = events.get_active_events(
                 tile_output_dir, tile=tile_id, aoi=aoi_name
@@ -298,11 +298,11 @@ def process_aoi(aoi, scene_dir=None, stac_client=None, output_dir="output",
                             )
                             previous_nbr = np.where(_zone, _frozen_arr, previous_nbr)
                             logger.info(
-                                "Tile %s: baseline pre-fire ripristinato per %s (frozen_nbr_temp)",
+                                "Tile %s: pre-fire baseline restored for %s (frozen_nbr_temp)",
                                 tile_id, _init_eid,
                             )
 
-        # Seleziona scene per tile successive al watermark ("" se scene esterne).
+        # Select tile scenes after the watermark (empty string if external scenes).
         if scenes is not None:
             date_floor = watermark if watermark is not None else ""
         else:
@@ -313,10 +313,10 @@ def process_aoi(aoi, scene_dir=None, stac_client=None, output_dir="output",
             and s.get("datetime", s.get("date", "")) > date_floor
         ]
         tile_scenes = _filter_scenes(tile_scenes, tile_id=tile_id)
-        tile_scenes.sort(key=lambda s: s.get("datetime", s.get("date", "")))  # ordine cronologico
+        tile_scenes.sort(key=lambda s: s.get("datetime", s.get("date", "")))  # chronological order
 
         if not tile_scenes:
-            logger.info("Nessuna nuova scena per AOI '%s' sul tile %s", aoi_name, tile_id)
+            logger.info("No new scenes for AOI '%s' on tile %s", aoi_name, tile_id)
             continue
 
         tile_scenes_processed = 0
@@ -325,19 +325,19 @@ def process_aoi(aoi, scene_dir=None, stac_client=None, output_dir="output",
 
         for scene in tile_scenes:
             scene_id = scene["stac_item_id"]
-            logger.info("Processo scena: %s", scene_id)
+            logger.info("Processing scene: %s", scene_id)
 
             try:
                 result = process_scene(scene, aoi, scene_dir, previous_nbr=previous_nbr)
-            except Exception as exc:  # noqa: BLE001  # errori di rete/IO transitori
-                logger.warning("Scena %s saltata per errore di rete/IO: %s", scene_id, exc)
+            except Exception as exc:  # noqa: BLE001  # transient network/IO errors
+                logger.warning("Scene %s skipped due to network/IO error: %s", scene_id, exc)
                 continue
             if result is None:
                 continue
 
             tile_scenes_processed += 1
 
-            # Ricalibra previous_nbr sulla prima scena SCL-ok dopo chiusura evento su SCL-fail.
+            # Recalibrate previous_nbr on the first SCL-ok scene after closing an event on SCL-fail.
             if tile_state.get("needs_recalibrate"):
                 _rc_nbr = result["nbr"]
                 _rc_vm  = result["valid_mask"]
@@ -348,7 +348,7 @@ def process_aoi(aoi, scene_dir=None, stac_client=None, output_dir="output",
                 _rc_denom   = _rc_land_px if _rc_land_px > 0 else _rc_vm.size
                 _rc_valid_pct = 100.0 * float(_rc_vm.sum()) / _rc_denom
                 if _rc_valid_pct < config.SCENE_VALID_SCL_PCT:
-                    logger.info("  Ricalibrazione rimandata: scena %s SCL %.1f%% < %.0f%%",
+                    logger.info("  Recalibration deferred: scene %s SCL %.1f%% < %.0f%%",
                                 scene_id, _rc_valid_pct, config.SCENE_VALID_SCL_PCT)
                     pipeline_state.update_watermark(tile_state, scene.get("datetime", scene.get("date", "")))
                     pipeline_state.save_state(tile_state, tile_data_dir)
@@ -359,7 +359,7 @@ def process_aoi(aoi, scene_dir=None, stac_client=None, output_dir="output",
                 baseline.save_nbr(previous_nbr, result["profile"], paths["previous"])
                 del tile_state["needs_recalibrate"]
                 pipeline_state.save_state(tile_state, tile_data_dir)
-                logger.info("  Ricalibrazione previous_nbr completata (scena %s, SCL %.1f%%)",
+                logger.info("  Recalibration of previous_nbr completed (scene %s, SCL %.1f%%)",
                             scene_id, _rc_valid_pct)
                 pipeline_state.update_watermark(tile_state, scene.get("datetime", scene.get("date", "")))
                 pipeline_state.save_state(tile_state, tile_data_dir)
@@ -375,14 +375,14 @@ def process_aoi(aoi, scene_dir=None, stac_client=None, output_dir="output",
             if _tile_aoi_mask is not None:
                 _m = _tile_aoi_mask
                 if _m.shape != valid_mask.shape:
-                    # Shape mismatch anomalo (tile MGRS uniformi non dovrebbero divergere).
-                    logger.warning("Tile %s: shape AOI mask %s != valid_mask %s, skip",
+                    # Anomalous shape mismatch (uniform MGRS tiles should not diverge).
+                    logger.warning("Tile %s: AOI mask shape %s != valid_mask shape %s, skip",
                                    tile_id, _m.shape, valid_mask.shape)
                 else:
                     valid_mask = valid_mask & _m
                     burnt_mask = burnt_mask & _m
             _threshold = result.get("threshold", config.DNBR_THRESHOLD)
-            # Variabili log riepilogo per-scena.
+            # Per-scene summary log variables.
             _log_area_ok     = result.get("fire_detected", False)
             _log_area_ha     = result.get("burnt_area_ha", 0.0)
             _log_idx_max     = result.get("max_index_val", 0.0)
@@ -396,7 +396,7 @@ def process_aoi(aoi, scene_dir=None, stac_client=None, output_dir="output",
             _denom = _land_px if _land_px > 0 else valid_mask.size
             valid_pct = 100.0 * valid_mask.sum() / _denom
 
-            # Lista eventi attivi: caricata prima del check SCL (serve anche in SCL-fail).
+            # Active event list: loaded before the SCL check (also needed on SCL-fail).
             active_eids = events.get_active_events(tile_output_dir, tile=tile_id, aoi=aoi_name)
             scene_date = scene.get("datetime", scene.get("date", ""))
 
@@ -405,15 +405,15 @@ def process_aoi(aoi, scene_dir=None, stac_client=None, output_dir="output",
                 logger.info("  area:      SKIP")
                 logger.info("  cluster:   SKIP")
                 if active_eids:
-                    logger.info("  => EVENTI IN CORSO: %s  (scena non contata - SCL)", active_eids)
+                    logger.info("  => ACTIVE EVENTS: %s  (scene not counted - SCL)", active_eids)
                 else:
                     logger.info("  => NO ACTIVE EVENT")
-                # Timeout su SCL-fail: should_close() controlla solo i giorni, non i dati NBR.
+                # Timeout on SCL-fail: should_close() checks days only, not NBR data.
                 for _eid in list(active_eids):
                     _close, _reason = events.should_close(_eid, tile_output_dir, current_date=scene_date)
                     if not _close:
                         continue
-                    logger.info("  => TIMEOUT su scena non valida: chiudo %s (%s)", _eid, _reason)
+                    logger.info("  => TIMEOUT on invalid scene: closing %s (%s)", _eid, _reason)
                     _summary = end_event.close_event(
                         _eid, tile_output_dir, reason=_reason,
                         scene_date=scene_date,
@@ -423,12 +423,12 @@ def process_aoi(aoi, scene_dir=None, stac_client=None, output_dir="output",
                         _gpkg_fp = Path(tile_output_dir) / f"{_eid}.gpkg"
                         if _gpkg_fp.exists():
                             _gpkg_fp.unlink(missing_ok=True)
-                        logger.info("  Output rimossi (false_positive): %s", _eid)
+                        logger.info("  Outputs removed (false_positive): %s", _eid)
                         tile_fp_count += 1
                     _frozen_del = Path(tile_data_dir) / f"frozen_nbr_{_eid}_temp.tif"
                     _frozen_del.unlink(missing_ok=True)
                     tile_state["needs_recalibrate"] = True
-                    logger.info("  => needs_recalibrate=True (chiusura %s su SCL-fail)", _eid)
+                    logger.info("  => needs_recalibrate=True (closure %s on SCL-fail)", _eid)
                 pipeline_state.update_watermark(tile_state, scene.get("datetime", scene.get("date", "")))
                 pipeline_state.save_state(tile_state, tile_data_dir)
                 continue
@@ -438,14 +438,14 @@ def process_aoi(aoi, scene_dir=None, stac_client=None, output_dir="output",
             _min_compactness = getattr(config, "MIN_CLUSTER_COMPACTNESS", None)
             _log_verdicts = []
 
-            # Pre-close timeout: chiudi eventi scaduti prima della detection.
+            # Pre-close timeout: close expired events before detection.
             if active_eids:
                 _timeout_closed = []
                 for _eid in list(active_eids):
                     _close, _reason = events.should_close(_eid, tile_output_dir, current_date=scene_date)
                     if not _close:
                         continue
-                    logger.info("  => Pre-close timeout: chiudo %s (%s) prima della detection", _eid, _reason)
+                    logger.info("  => Pre-close timeout: closing %s (%s) before detection", _eid, _reason)
                     _summary = end_event.close_event(
                         _eid, tile_output_dir, reason=_reason,
                         current_nbr=nbr, valid_mask=valid_mask,
@@ -458,14 +458,14 @@ def process_aoi(aoi, scene_dir=None, stac_client=None, output_dir="output",
                         _gpkg_fp = Path(tile_output_dir) / f"{_eid}.gpkg"
                         if _gpkg_fp.exists():
                             _gpkg_fp.unlink(missing_ok=True)
-                        logger.info("  Output rimossi (false_positive): %s", _eid)
+                        logger.info("  Outputs removed (false_positive): %s", _eid)
                         tile_fp_count += 1
                     _frozen_del = Path(tile_data_dir) / f"frozen_nbr_{_eid}_temp.tif"
                     _frozen_del.unlink(missing_ok=True)
                     active_eids.remove(_eid)
                     _timeout_closed.append(_eid)
                 if _timeout_closed and not active_eids:
-                    # Tutti chiusi: ricarica previous_nbr e salta detection.
+                    # All closed: reload previous_nbr and skip detection.
                     previous_nbr, _ = baseline.load_nbr(paths["previous"])
                     pipeline_state.update_watermark(tile_state, scene.get("datetime", scene.get("date", "")))
                     pipeline_state.save_state(tile_state, tile_data_dir)
@@ -473,13 +473,13 @@ def process_aoi(aoi, scene_dir=None, stac_client=None, output_dir="output",
             # ---
 
             if active_eids:
-                # EVENTI ATTIVI: nearest-footprint, poi pixel orfani.
-                # burnt_mask include filtro NIR: evita accumulo da essiccamento fenologico.
+                # ACTIVE EVENTS: nearest-footprint, then orphan pixels.
+                # burnt_mask includes NIR filter: avoids accumulation from phenological drying.
                 burnt_for_accum = burnt_mask.copy()
                 remaining = burnt_mask.copy()
 
-                # Nearest-footprint (Voronoi): pixel → evento più vicino entro
-                # MAX_INITIAL_MERGE_DISTANCE_KM; quelli oltre restano in 'remaining'.
+                # Nearest-footprint (Voronoi): pixel -> nearest event within
+                # MAX_INITIAL_MERGE_DISTANCE_KM; those beyond remain in 'remaining'.
                 footprints = {eid: events.load_footprint_mask(eid, tile_output_dir)
                               for eid in active_eids}
 
@@ -526,10 +526,10 @@ def process_aoi(aoi, scene_dir=None, stac_client=None, output_dir="output",
                             aoi_mask=_tile_aoi_mask,
                         )
                     _log_verdicts.append(
-                        f"EVENTO IN CORSO: {eid}  (scena {_ev_n_valid}/{config.EVENT_WINDOW_SCENES})"
+                        f"ACTIVE EVENT: {eid}  (scene {_ev_n_valid}/{config.EVENT_WINDOW_SCENES})"
                     )
 
-                # Verifica pixel orfani (incendio nuovo o frammentazione)
+                # Check orphan pixels (new fire or fragmentation)
                 if remaining.any():
                     _remaining_ha = float(remaining.sum()) * pixel_area_ha
                     _largest_rem = events.largest_cluster_area_ha(remaining, pixel_area_ha)
@@ -552,14 +552,14 @@ def process_aoi(aoi, scene_dir=None, stac_client=None, output_dir="output",
                                 aoi_mask=_tile_aoi_mask,
                             )
                             _log_verdicts.append(
-                                f"ALERT: aperto {new_eid} (pixel orfani  "
-                                f"{cl['area_ha']:.1f} ha  scena 1/{config.EVENT_WINDOW_SCENES})"
+                                f"ALERT: opened {new_eid} (orphan pixels  "
+                                f"{cl['area_ha']:.1f} ha  scene 1/{config.EVENT_WINDOW_SCENES})"
                             )
 
                 _log_cluster_ok  = None
 
             else:
-                # NESSUN EVENTO ATTIVO: applica filtri e apri per cluster.
+                # NO ACTIVE EVENTS: apply filters and open per cluster.
                 largest_cluster_ha = events.largest_cluster_area_ha(burnt_mask, pixel_area_ha)
                 _total_burnt_ha = float(burnt_mask.sum()) * pixel_area_ha
                 _compactness = (largest_cluster_ha / _total_burnt_ha) if _total_burnt_ha > 0 else 0.0
@@ -577,9 +577,9 @@ def process_aoi(aoi, scene_dir=None, stac_client=None, output_dir="output",
                 ):
                     new_clusters = events.find_clusters(burnt_mask, pixel_area_ha)
                     if not new_clusters:
-                        # Fallback: nessun cluster da solidity → apri su intera maschera.
+                        # Fallback: no cluster from solidity -> open on full mask.
                         new_clusters = [{"mask": burnt_mask, "area_ha": largest_cluster_ha}]
-                    # Fonde cluster entro MAX_INITIAL_MERGE_DISTANCE_KM; oltre → eventi separati.
+                    # Merge clusters within MAX_INITIAL_MERGE_DISTANCE_KM; beyond -> separate events.
                     _tr = profile["transform"]
                     _merge_thr_m = config.MAX_INITIAL_MERGE_DISTANCE_KM * 1000.0
                     _cl_xy = []
@@ -587,7 +587,7 @@ def process_aoi(aoi, scene_dir=None, stac_client=None, output_dir="output",
                         _ys, _xs = np.where(_cln["mask"])
                         _x, _y = _rt.xy(_tr, float(_ys.mean()), float(_xs.mean()))
                         _cl_xy.append((_x, _y))
-                    # Union-Find: raggruppa cluster entro soglia
+                    # Union-Find: group clusters within threshold
                     _uf = list(range(len(new_clusters)))
                     def _uf_find(x):
                         while _uf[x] != x:
@@ -625,15 +625,15 @@ def process_aoi(aoi, scene_dir=None, stac_client=None, output_dir="output",
                             aoi_mask=_tile_aoi_mask,
                         )
                         _log_verdicts.append(
-                            f"ALERT: aperto {new_eid} (scena 1/{config.EVENT_WINDOW_SCENES}  "
+                            f"ALERT: opened {new_eid} (scene 1/{config.EVENT_WINDOW_SCENES}  "
                             f"{_gmask_ha:.1f} ha"
-                            + (f"  {_gmeta['n']} cluster fusi" if _gmeta['n'] > 1 else "")
+                            + (f"  {_gmeta['n']} merged clusters" if _gmeta['n'] > 1 else "")
                             + ")"
                         )
                 if not _log_verdicts:
                     _log_verdicts.append("NO ACTIVE EVENT")
 
-            # --- Riepilogo per-scena ---
+            # --- Per-scene summary ---
             logger.info("  SCL:       %.1f%%  OK", valid_pct)
             if _log_cluster_ok is None:
                 logger.info("  area:      %.2f ha  (%s max=%.3f)",
@@ -645,7 +645,7 @@ def process_aoi(aoi, scene_dir=None, stac_client=None, output_dir="output",
                 )
                 logger.info("  area:      %s", _area_str)
                 if not _log_area_ok:
-                    logger.info("  cluster:   SKIP (area < soglia)")
+                    logger.info("  cluster:   SKIP (area < threshold)")
                 elif _log_cluster_ok:
                     logger.info(
                         "  cluster:   %.1f/%.1f ha = %.1f%%  OK",
@@ -663,15 +663,15 @@ def process_aoi(aoi, scene_dir=None, stac_client=None, output_dir="output",
                 else:
                     logger.info("  => %s", _verdict)
 
-            # Senza eventi attivi: aggiorna previous_nbr (anche pixel edge della cicatrice,
-            # altrimenti loop infinito). Con eventi attivi: congelato fino a close_event.
+            # No active events: update previous_nbr (including edge pixels of the scar,
+            # otherwise infinite loop). With active events: frozen until close_event.
             if not active_eids:
                 previous_nbr = np.where(valid_mask, nbr, previous_nbr)
                 if _tile_aoi_mask is not None and previous_nbr.shape == _tile_aoi_mask.shape:
                     previous_nbr = np.where(_tile_aoi_mask, previous_nbr, np.nan).astype(np.float32)
                 baseline.save_nbr(previous_nbr, profile, paths["previous"])
 
-            for eid in list(active_eids):  # copia per poter rimuovere durante iterazione
+            for eid in list(active_eids):  # copy to allow removal during iteration
                 close, reason = events.should_close(eid, tile_output_dir, current_date=scene_date)
                 if not close:
                     continue
@@ -687,28 +687,28 @@ def process_aoi(aoi, scene_dir=None, stac_client=None, output_dir="output",
                     _gpkg_fp = Path(tile_output_dir) / f"{eid}.gpkg"
                     if _gpkg_fp.exists():
                         _gpkg_fp.unlink(missing_ok=True)
-                    logger.info("  Output rimossi (false_positive): %s", eid)
+                    logger.info("  Outputs removed (false_positive): %s", eid)
                     tile_fp_count += 1
                 active_eids.remove(eid)
                 _frozen_del = Path(tile_data_dir) / f"frozen_nbr_{eid}_temp.tif"
                 _frozen_del.unlink(missing_ok=True)
                 if _is_fp:
-                    # FP: previous_nbr era frozen; aggiornalo per evitare loop di FP
-                    # causati dall'essiccamento stagionale accumulato nella finestra evento.
-                    if not active_eids:  # aggiorna solo se non ci sono altri eventi attivi
+                    # FP: previous_nbr was frozen; update it to avoid FP loops
+                    # caused by seasonal drying accumulated over the event window.
+                    if not active_eids:  # update only if no other active events
                         previous_nbr = np.where(valid_mask, nbr, previous_nbr)
                         if _tile_aoi_mask is not None and previous_nbr.shape == _tile_aoi_mask.shape:
                             previous_nbr = np.where(_tile_aoi_mask, previous_nbr, np.nan).astype(np.float32)
                         baseline.save_nbr(previous_nbr, profile, paths["previous"])
-                    logger.info("  Baseline aggiornata post false_positive (era frozen %d scene)",
+                    logger.info("  Baseline updated after false_positive (was frozen %d scenes)",
                                 _summary.get("n_valid_scenes", 0) if _summary else 0)
                 else:
-                    # Ricarica previous_nbr da disco (close_event ha incorporato la cicatrice)
-                    # per evitare ri-detection loop. Poi ripristina pre-fire per eventi ancora attivi.
+                    # Reload previous_nbr from disk (close_event has incorporated the scar)
+                    # to avoid re-detection loop. Then restore pre-fire for still-active events.
                     _reloaded, _ = data_io.read_band(str(paths["previous"]))
                     if _reloaded is not None:
                         _new_prev = _reloaded.astype(np.float32)
-                        for _still_eid in active_eids:  # eid chiuso gia' rimosso
+                        for _still_eid in active_eids:  # closed eid already removed
                             _fp = events.load_footprint_mask(_still_eid, tile_output_dir)
                             if _fp is not None and _fp.any():
                                 _sep = getattr(config, "EVENT_BASELINE_BUFFER_PX", 0) or 0
@@ -716,7 +716,7 @@ def process_aoi(aoi, scene_dir=None, stac_client=None, output_dir="output",
                                          if _sep > 0 else _fp)
                                 _new_prev = np.where(_zone, previous_nbr, _new_prev)
                         previous_nbr = _new_prev
-                        # Aggiorna frozen_nbr_temp per resume dopo crash.
+                        # Update frozen_nbr_temp for resume after crash.
                         for _still_eid in active_eids:
                             _frozen_path = Path(tile_data_dir) / f"frozen_nbr_{_still_eid}_temp.tif"
                             baseline.save_nbr(previous_nbr, profile, str(_frozen_path))
@@ -727,9 +727,9 @@ def process_aoi(aoi, scene_dir=None, stac_client=None, output_dir="output",
             pipeline_state.save_state(tile_state, tile_data_dir)
 
         _tile_confirmed = tile_alerts - tile_fp_count
-        _fp_str = f", {tile_fp_count} falsi positivi" if tile_fp_count else ""
+        _fp_str = f", {tile_fp_count} false positives" if tile_fp_count else ""
         logger.info(
-            "Tile %s completato: %d scene processate, %d alert confermati%s",
+            "Tile %s done: %d scenes processed, %d confirmed alerts%s",
             tile_id, tile_scenes_processed, _tile_confirmed, _fp_str,
         )
         total_scenes_processed += tile_scenes_processed
@@ -738,15 +738,15 @@ def process_aoi(aoi, scene_dir=None, stac_client=None, output_dir="output",
         processed_tiles.append(tile_id)
 
     _aoi_confirmed = total_alerts - total_fp_count
-    _aoi_fp_str = f", {total_fp_count} falsi positivi" if total_fp_count else ""
-    # Conta eventi ancora aperti su tutti i tile al termine del run
+    _aoi_fp_str = f", {total_fp_count} false positives" if total_fp_count else ""
+    # Count events still open on all tiles at the end of the run
     _total_open = sum(
         len(events.list_active_events(str(Path(output_dir) / tid), tile=tid, aoi=aoi_name))
         for tid in processed_tiles
     )
-    _open_str = f", {_total_open} eventi in corso" if _total_open else ""
+    _open_str = f", {_total_open} events in progress" if _total_open else ""
     logger.info(
-        "=== AOI '%s' completata: %d tile, %d scene processate, %d alert confermati%s%s ===",
+        "=== AOI '%s' completed: %d tiles, %d scenes processed, %d confirmed alerts%s%s ===",
         aoi_name, len(processed_tiles), total_scenes_processed, _aoi_confirmed, _aoi_fp_str, _open_str,
     )
     return {
@@ -759,31 +759,31 @@ def process_aoi(aoi, scene_dir=None, stac_client=None, output_dir="output",
 
 
 # ---------------------------------------------------------------------------
-# Entry point operativo
+# Operational entry point
 # ---------------------------------------------------------------------------
 
 def _build_baseline_from_metas(aoi, pre_metas, tile_id, tile_data_dir,
                                campaign_start=None):
-    """Wrapper di compatibilità — delegato a baseline.build_baseline_from_metas."""
+    """Compatibility wrapper -- delegates to baseline.build_baseline_from_metas."""
     return baseline.build_baseline_from_metas(
         aoi, pre_metas, tile_id, tile_data_dir,
         scene_dir=None, campaign_start=campaign_start,
     )
 
-# Formati vettoriali supportati per le AOI, in ordine di priorità.
-# GeoParquet richiede GDAL >= 3.5 compilato con il driver Arrow/Parquet.
-# Per aggiungere una nuova AOI: creare una sottocartella in AOIs/ con un
-# file vettoriale in uno dei formati elencati. Il nome della cartella è
-# l'identificatore AOI. Per cambiare la cartella radice usare --aois-root.
+# Supported vector formats for AOIs, in priority order.
+# GeoParquet requires GDAL >= 3.5 compiled with the Arrow/Parquet driver.
+# To add a new AOI: create a subfolder in AOIs/ with a vector file in one
+# of the listed formats. The folder name is the AOI identifier.
+# To change the root folder use --aois-root.
 _AOI_EXTENSIONS = [".geojson", ".gpkg", ".shp", ".kml", ".gml", ".parquet"]
 
 
 def _scan_aois(aois_root="AOIs"):
-    """Scansiona <aois_root>/ e restituisce dict {nome_cartella: path_file}.
+    """Scan <aois_root>/ and return dict {folder_name: file_path}.
 
-    Supporta qualsiasi formato in _AOI_EXTENSIONS (GeoJSON, GeoPackage,
-    GeoParquet, Shapefile, KML, GML). Usa il primo file trovato per ciascuna
-    cartella, nell'ordine di priorità definito da _AOI_EXTENSIONS.
+    Supports any format in _AOI_EXTENSIONS (GeoJSON, GeoPackage,
+    GeoParquet, Shapefile, KML, GML). Uses the first file found in each
+    folder, in the priority order defined by _AOI_EXTENSIONS.
     """
     root = Path(aois_root)
     found = {}
@@ -799,13 +799,13 @@ def _scan_aois(aois_root="AOIs"):
         if path:
             found[subfolder.name] = path
         else:
-            logger.warning("AOI '%s': nessun file vettoriale trovato, cartella ignorata",
+            logger.warning("AOI '%s': no vector file found, folder ignored",
                            subfolder.name)
     return found
 
 
 def main():
-    # Forza UTF-8 sullo stdout per compatibilita' OS-indipendente
+    # Force UTF-8 on stdout for OS-independent compatibility
     _utf8_stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace",
                                    line_buffering=True)
     _fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
@@ -813,40 +813,40 @@ def main():
     _console_handler = logging.StreamHandler(_utf8_stdout)
     _console_handler.setFormatter(_fmt)
 
-    # Setup logging console-only in anticipo (prima del parse args)
+    # Console-only logging setup before argparse (per-AOI file handlers added in the loop)
     logging.basicConfig(level=logging.INFO, handlers=[_console_handler])
 
     p = argparse.ArgumentParser(
-        description="Monitoraggio aree bruciate Sentinel-2 — lancio operativo"
+        description="Sentinel-2 burned area monitoring -- operational run"
     )
     p.add_argument(
         "--aoi", default=None, nargs='+',
-        help="Nome/i sottocartella/e in AOIs/ da processare (es: --aoi Chios Attica). Default: tutte",
+        help="Subfolder name(s) in AOIs/ to process (e.g. --aoi Chios Attica). Default: all",
     )
     p.add_argument(
         "--aois-root", default="AOIs",
-        help="Path alla cartella radice delle AOI (default: AOIs/)",
+        help="Path to the root AOI folder (default: AOIs/)",
     )
     p.add_argument(
         "--output-root", default="output",
-        help="Path radice degli output (default: output/)",
+        help="Root path for outputs (default: output/)",
     )
     p.add_argument(
         "--stac-url", default="https://earth-search.aws.element84.com/v1",
-        help="URL catalogo STAC",
+        help="STAC catalog URL",
     )
     p.add_argument(
         "--collection", default="sentinel-2-c1-l2a",
-        help="Nome collection STAC",
+        help="STAC collection name",
     )
     args = p.parse_args()
 
-    # Timestamp condiviso per i nomi dei log per-AOI
+    # Shared timestamp for per-AOI log file names
     _run_ts = datetime.now().strftime('%Y%m%d_%H%M%S')
 
-    # --- Date campagna ---
-    # CAMPAIGN_START_DATE = None  → campagna parte da oggi (solo baseline)
-    # CAMPAIGN_START_DATE = "2024-07-01" → monitoraggio storico da quella data
+    # --- Campaign dates ---
+    # CAMPAIGN_START_DATE = None  -> campaign starts today (baseline only)
+    # CAMPAIGN_START_DATE = "2024-07-01" -> historical monitoring from that date
     today = datetime.utcnow().date()
     if config.CAMPAIGN_START_DATE is None:
         campaign_start = today
@@ -855,37 +855,37 @@ def main():
 
     baseline_end = campaign_start
     baseline_start = baseline_end - timedelta(days=config.BASELINE_LOOKBACK_DAYS)
-    monitoring_end = today  # sempre "oggi"
+    monitoring_end = today  # always "today"
 
     logger.info("=" * 60)
-    logger.info("MONITORAGGIO INCENDI -- avvio operativo")
+    logger.info("FIRE MONITORING -- operational start")
     if config.CAMPAIGN_START_DATE is None:
-        logger.info("  Modalita': operativa (campaign_start da file per-AOI o today)")
+        logger.info("  Mode: operational (campaign_start from per-AOI file or today)")
     else:
         logger.info("  Baseline:    %s -> %s", baseline_start, baseline_end)
-        logger.info("  Monitoraggio: %s -> %s", campaign_start, monitoring_end)
+        logger.info("  Monitoring:  %s -> %s", campaign_start, monitoring_end)
     logger.info("=" * 60)
 
-    # --- Scan AOI ---
+    # --- Scan AOIs ---
     aoi_map = _scan_aois(args.aois_root)
     if not aoi_map:
-        logger.error("Nessuna AOI trovata in '%s'", args.aois_root)
+        logger.error("No AOIs found in '%s'", args.aois_root)
         sys.exit(1)
 
     if args.aoi:
         missing = [a for a in args.aoi if a not in aoi_map]
         if missing:
-            logger.error("AOI non trovate in '%s': %s. Disponibili: %s",
+            logger.error("AOIs not found in '%s': %s. Available: %s",
                          args.aois_root, ", ".join(missing), ", ".join(aoi_map))
             sys.exit(1)
         aoi_map = {a: aoi_map[a] for a in args.aoi}
 
-    logger.info("AOI da processare: %s", ", ".join(aoi_map))
+    logger.info("AOIs to process: %s", ", ".join(aoi_map))
 
     had_failures = False
 
     for aoi_name, shp_path in aoi_map.items():
-        # Log separato per AOI: logs/run_<timestamp>_<aoi_name>.log
+        # Separate log per AOI: logs/run_<timestamp>_<aoi_name>.log
         _aoi_log_dir = Path(args.output_root) / "logs"
         _aoi_log_dir.mkdir(parents=True, exist_ok=True)
         _aoi_log_path = _aoi_log_dir / f"run_{_run_ts}_{aoi_name}.log"
@@ -895,7 +895,7 @@ def main():
 
         logger.info("")
         logger.info(">>> AOI: %s", aoi_name)
-        logger.info("    Log AOI: %s", _aoi_log_path)
+        logger.info("    AOI log: %s", _aoi_log_path)
 
         aoi = data_io.load_aoi(shp_path)
         aoi["name"] = aoi_name
@@ -906,7 +906,7 @@ def main():
         data_dir   = str(aoi_root / "data")
         output_dir = str(aoi_root / "products")
 
-        # campaign_start per AOI: legge dallo state se disponibile (evita deriva giornaliera).
+        # campaign_start per AOI: read from state if available (avoids daily drift).
         if config.CAMPAIGN_START_DATE is None:
             first_tile_state_dir = next(
                 (str(aoi_root / "data" / d.name)
@@ -920,17 +920,17 @@ def main():
                 persisted = _st.get("baseline", {}).get("campaign_start")
             if persisted:
                 aoi_campaign_start = datetime.fromisoformat(persisted).date()
-                logger.info("    campaign_start da state: %s", aoi_campaign_start)
+                logger.info("    campaign_start from state: %s", aoi_campaign_start)
             else:
                 aoi_campaign_start = campaign_start  # today
         else:
-            aoi_campaign_start = campaign_start  # data esplicita da config
+            aoi_campaign_start = campaign_start  # explicit date from config
 
         aoi_baseline_end   = aoi_campaign_start
         aoi_baseline_start = aoi_baseline_end - timedelta(days=config.BASELINE_LOOKBACK_DAYS)
 
         # --- Query STAC baseline ---
-        logger.info("    Query STAC baseline: %s -> %s", aoi_baseline_start, aoi_baseline_end)
+        logger.info("    STAC baseline query: %s -> %s", aoi_baseline_start, aoi_baseline_end)
         try:
             pre_metas = data_io.query_stac(
                 bbox_wgs84,
@@ -939,41 +939,40 @@ def main():
             )
             pre_metas = _filter_scenes(pre_metas, tile_id=f"{aoi_name}/baseline")
         except Exception as exc:
-            logger.error("    Errore query STAC baseline per '%s': %s", aoi_name, exc)
+            logger.error("    STAC baseline query error for '%s': %s", aoi_name, exc)
             had_failures = True
             continue
 
-        # --- Costruzione baseline per-tile (salta se già su disco) ---
+        # --- Per-tile baseline build (skipped if already on disk) ---
         tile_ids_pre = sorted({_get_tile_id(m) for m in pre_metas
                                 if _get_tile_id(m) != "unknown"})
         if not tile_ids_pre:
-            logger.warning("    Nessun tile trovato nella query baseline per '%s', salto",
+            logger.warning("    No tiles found in baseline query for '%s', skipping",
                            aoi_name)
             continue
-        logger.info("    Tile rilevati: %s", ", ".join(tile_ids_pre))
+        logger.info("    Detected tiles: %s", ", ".join(tile_ids_pre))
 
-        # FORCE_REPROCESS: pulisci tutti i tile dell'AOI in una sola passata,
-        # prima di qualsiasi costruzione baseline.
+        # FORCE_REPROCESS: clean all tiles at once before any baseline build.
         if config.FORCE_REPROCESS:
             import shutil as _shutil
-            logger.warning("FORCE_REPROCESS=True -- pulizia completa AOI '%s' (%d tile)",
+            logger.warning("FORCE_REPROCESS=True -- full cleanup AOI '%s' (%d tiles)",
                            aoi_name, len(tile_ids_pre))
             for tid in tile_ids_pre:
                 _data_p = aoi_root / "data" / tid
                 if _data_p.exists():
                     _shutil.rmtree(str(_data_p))
-                    logger.warning("  Eliminata cartella dati: %s", _data_p)
+                    logger.warning("  Deleted data folder: %s", _data_p)
                 _out_p = aoi_root / "products" / tid
                 if _out_p.exists():
                     _shutil.rmtree(str(_out_p))
-                    logger.warning("  Eliminata cartella output: %s", _out_p)
+                    logger.warning("  Deleted output folder: %s", _out_p)
 
         baseline_ok = True
         for tid in tile_ids_pre:
             tile_data_dir = str(aoi_root / "data" / tid)
             if not _build_baseline_from_metas(aoi, pre_metas, tid, tile_data_dir,
                                                campaign_start=aoi_campaign_start):
-                logger.error("    Baseline fallita per tile %s — AOI '%s' saltata",
+                logger.error("    Baseline failed for tile %s -- AOI '%s' skipped",
                              tid, aoi_name)
                 baseline_ok = False
         if not baseline_ok:
@@ -982,7 +981,7 @@ def main():
 
         # --- Query STAC monitoraggio ---
         if aoi_campaign_start < monitoring_end:
-            logger.info("    Query STAC monitoraggio: %s -> %s",
+            logger.info("    STAC monitoring query: %s -> %s",
                         aoi_campaign_start, monitoring_end)
             try:
                 post_metas = data_io.query_stac(
@@ -992,18 +991,18 @@ def main():
                 )
                 post_metas = _filter_scenes(post_metas, tile_id=f"{aoi_name}/monitoraggio")
             except Exception as exc:
-                logger.error("    Errore query STAC monitoraggio per '%s': %s",
+                logger.error("    STAC monitoring query error for '%s': %s",
                              aoi_name, exc)
                 had_failures = True
                 continue
         else:
-            # aoi_campaign_start == oggi: nessuna scena da monitorare ancora
+            # aoi_campaign_start == today: no monitoring scenes yet
             post_metas = []
-            logger.info("    Nessuna scena di monitoraggio (campagna inizia oggi — "
-                        "baseline pronta per il prossimo ciclo schedulato)")
+            logger.info("    No monitoring scenes (campaign starts today -- "
+                        "baseline ready for next scheduled cycle)")
 
         if not post_metas:
-            logger.info("    AOI '%s' completata: baseline OK, nessuna scena da processare",
+            logger.info("    AOI '%s' completed: baseline OK, no scenes to process",
                         aoi_name)
             continue
 
@@ -1015,12 +1014,12 @@ def main():
                 data_dir=data_dir,
             )
         except Exception as exc:
-            logger.error("    Errore pipeline per AOI '%s': %s", aoi_name, exc,
+            logger.error("    Pipeline error for AOI '%s': %s", aoi_name, exc,
                          exc_info=True)
             had_failures = True
 
         finally:
-            # Chiudi e rimuovi il file handler per-AOI
+            # Close and remove the per-AOI file handler
             logging.getLogger().removeHandler(_aoi_fh)
             _aoi_fh.close()
 

@@ -1,20 +1,20 @@
 """
-events.py -- Gestione eventi di incendio.
+events.py -- Fire event management.
 
-Supporta multi-event per tile/AOI:
-- Ogni cluster bruciato spazialmente separato apre il proprio evento.
-- Nella finestra evento, i pixel burnt vengono assegnati all'evento il cui
-  footprint e' piu' prossimo (dilation-based); i pixel orfani aprono nuovi
-  eventi se passano i filtri area+solidity.
-- Ogni evento ha il proprio contatore n_valid_scenes indipendente.
+Supports multiple concurrent events per tile/AOI:
+- Each spatially separated burnt cluster opens its own event.
+- Within an active event window, burnt pixels are assigned to the
+  nearest event footprint (dilation-based); orphan pixels open new
+  events if they pass the area+solidity filters.
+- Each event has its own independent n_valid_scenes counter.
 
-Persistenza:
+Persistence:
     <output_dir>/events_index.json
     <output_dir>/<event_id>/
-        burnt_count.tif (uint8)   -- somma scene in cui ogni pixel e' bruciato
-        obs_count.tif   (uint8)   -- numero di scene valide su ogni pixel
-        max_dnbr.tif    (float32) -- dNBR massimo per pixel sull'evento
-        (+ raster per-scena: *_dNBR.tif, *_severity_prelim.tif, severity_final.tif)
+        burnt_count.tif (uint8)   -- sum of scenes in which each pixel was burnt
+        obs_count.tif   (uint8)   -- number of valid scenes for each pixel
+        max_dnbr.tif    (float32) -- peak dNBR per pixel across the event
+        (+ per-scene rasters: *_dNBR.tif, *_severity_prelim.tif, severity_final.tif)
 """
 
 import json
@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _format_scene_ts(dt_str):
-    """Converte datetime ISO in formato compatto YYYYMMDDTHHMMSS."""
+    """Convert an ISO datetime string to compact YYYYMMDDTHHMMSS format."""
     if not dt_str:
         return datetime.utcnow().strftime("%Y%m%dT%H%M%S")
     s = dt_str.replace("Z", "")
@@ -50,7 +50,7 @@ def _format_scene_ts(dt_str):
         s = s.split(".")[0]
     if "T" not in s:
         s = s + "T000000"
-    return s  # es. "20250814T091700"
+    return s  # e.g. "20250814T091700"
 
 
 # ---------------------------------------------------------------------------
@@ -58,7 +58,7 @@ def _format_scene_ts(dt_str):
 # ---------------------------------------------------------------------------
 
 def event_dir(event_id, output_dir):
-    """Sidecar folder dell'evento (accumulatori + raster per-scena)."""
+    """Sidecar folder for an event (accumulators + per-scene rasters)."""
     p = Path(output_dir) / event_id
     p.mkdir(parents=True, exist_ok=True)
     return p
@@ -78,7 +78,7 @@ def index_path(output_dir):
 
 
 # ---------------------------------------------------------------------------
-# Indice eventi (atomic JSON I/O)
+# Event index (atomic JSON I/O)
 # ---------------------------------------------------------------------------
 
 def load_index(output_dir):
@@ -89,7 +89,7 @@ def load_index(output_dir):
         with open(p, "r", encoding="utf-8") as f:
             return json.load(f)
     except (json.JSONDecodeError, OSError) as exc:
-        logger.warning("Indice eventi corrotto (%s), ricreo vuoto", exc)
+        logger.warning("Event index corrupted (%s), resetting to empty", exc)
         return {}
 
 
@@ -101,11 +101,11 @@ def save_index(index, output_dir):
 
 
 # ---------------------------------------------------------------------------
-# Lookup evento attivo
+# Active event lookup
 # ---------------------------------------------------------------------------
 
 def get_active_events(output_dir, tile, aoi):
-    """Restituisce la lista degli event_id aperti per (tile, aoi), ordinata per data."""
+    """Return the list of open event IDs for (tile, aoi), sorted by date."""
     idx = load_index(output_dir)
     candidates = [
         (eid, meta) for eid, meta in idx.items()
@@ -128,7 +128,7 @@ def list_active_events(output_dir, tile=None, aoi=None):
 
 
 # ---------------------------------------------------------------------------
-# I/O accumulator raster (1 read + 1 write per scena)
+# Accumulator raster I/O (1 read + 1 write per scene)
 # ---------------------------------------------------------------------------
 
 def _read_accumulator(path, shape, dtype):
@@ -139,7 +139,7 @@ def _read_accumulator(path, shape, dtype):
 
 
 def load_accumulators(event_id, output_dir, shape):
-    """Carica i 3 raster accumulator in RAM.
+    """Load the 3 accumulator rasters into memory.
 
     Returns
     -------
@@ -155,7 +155,7 @@ def load_accumulators(event_id, output_dir, shape):
 
 
 def save_accumulators(event_id, output_dir, accs, profile):
-    """Scrive i 3 raster accumulator su disco (1 sola volta per scena)."""
+    """Write the 3 accumulator rasters to disk (once per scene)."""
     p = event_paths(event_id, output_dir)
     data_io.write_geotiff(accs["burnt_count"], profile, p["burnt_count"], dtype="uint8",   nodata=0)
     data_io.write_geotiff(accs["obs_count"],   profile, p["obs_count"],   dtype="uint8",   nodata=0)
@@ -169,21 +169,21 @@ def save_accumulators(event_id, output_dir, accs, profile):
 def find_clusters(burnt_mask, pixel_area_ha,
                   min_area_ha=None, min_solidity=None, separation_px=None,
                   opening_radius_px=None):
-    """Individua cluster contigui in burnt_mask che passano i filtri.
+    """Find contiguous clusters in burnt_mask that pass the filters.
 
-    Parametri (se None: usa valori da config):
-        min_area_ha      : area minima per cluster (ha)
-        min_solidity     : rapporto area/convex_hull minimo
-        separation_px    : distanza (px) sotto cui due cluster vengono fusi prima
-                           dell'analisi (gestisce frammentazione da nuvole)
-        opening_radius_px: raggio opening morfologico pre-labeling (rompe bridge di rumore).
-                           0 = disabilitato. None = legge da config.
+    Parameters (if None: reads from config):
+        min_area_ha      : minimum cluster area (ha)
+        min_solidity     : minimum area/convex_hull ratio
+        separation_px    : distance (px) below which two clusters are merged
+                           before analysis (handles cloud fragmentation)
+        opening_radius_px: morphological opening radius pre-labeling (breaks noise bridges).
+                           0 = disabled. None = reads from config.
 
     Returns
     -------
     list[dict]
-        Ogni elemento: {"mask": np.ndarray bool, "area_ha": float, "label_id": int}
-        Ordinato per area decrescente.
+        Each element: {"mask": np.ndarray bool, "area_ha": float, "label_id": int}
+        Sorted by area descending.
     """
     if min_area_ha is None:
         min_area_ha = getattr(config, "MIN_ALERT_AREA_HA", 5.0)
@@ -197,11 +197,11 @@ def find_clusters(burnt_mask, pixel_area_ha,
     if not burnt_mask.any():
         return []
 
-    # --- Opening morfologico pre-labeling ---
-    # Rimuove pixel isolati e rompe bridge sottili di rumore tra aree bruciate
-    # distinte. La labeling avviene sulla maschera "pulita"; i pixel rimossi
-    # dall'erosione vengono recuperati via dilatazione prima di assegnare
-    # il cluster all'evento (per non perdere pixel reali di bordo).
+    # --- Morphological opening pre-labeling ---
+    # Removes isolated pixels and breaks thin noise bridges between distinct
+    # burnt areas. Labeling runs on the "clean" mask; pixels removed by erosion
+    # are recovered via dilation before assigning the cluster to an event
+    # (to avoid losing real border pixels).
     if opening_radius_px > 0:
         r = int(opening_radius_px)
         kernel = np.ones((2 * r + 1, 2 * r + 1), dtype=bool)
@@ -209,14 +209,14 @@ def find_clusters(burnt_mask, pixel_area_ha,
     else:
         seed_mask = burnt_mask
 
-    structure = np.ones((3, 3), dtype=np.uint8)  # 8-connessi
+    structure = np.ones((3, 3), dtype=np.uint8)  # 8-connected
     labeled, n = label(seed_mask, structure=structure)
     if n == 0:
         return []
 
-    # --- Fusione cluster vicini (separation_px) ---
+    # --- Merge nearby clusters (separation_px) ---
     if separation_px and separation_px > 0 and n > 1:
-        # Centroide di ogni cluster (coordinate riga, colonna)
+        # Centroid of each cluster (row, column coordinates)
         centroids = {}
         for lbl in range(1, n + 1):
             ys, xs = np.where(labeled == lbl)
@@ -228,7 +228,7 @@ def find_clusters(burnt_mask, pixel_area_ha,
         tree = cKDTree(coords)
         pairs = tree.query_pairs(r=separation_px)
 
-        # Union-Find per fondere cluster vicini
+        # Union-Find to merge nearby clusters
         parent = {l: l for l in lbl_ids}
         def _find(x):
             while parent[x] != x:
@@ -240,7 +240,7 @@ def find_clusters(burnt_mask, pixel_area_ha,
             if ri != rj:
                 parent[rj] = ri
 
-        # Remap etichette: ogni cluster ottiene l'etichetta del suo root
+        # Remap labels: each cluster gets its root label
         remap = {l: _find(l) for l in lbl_ids}
         new_labeled = np.zeros_like(labeled)
         for old_lbl, new_lbl in remap.items():
@@ -250,10 +250,10 @@ def find_clusters(burnt_mask, pixel_area_ha,
     else:
         unique_lbls = list(range(1, n + 1))
 
-    # --- Filtri area e solidity per ogni cluster ---
-    # Alloca un array di priorità per il recovery: pixel di bordo vengono
-    # assegnati al cluster più grande che li riclama (nessun duplicato).
-    assigned = np.zeros(burnt_mask.shape, dtype=np.int32)  # 0 = non assegnato
+    # --- Area and solidity filters for each cluster ---
+    # Allocate a priority array for recovery: border pixels are assigned
+    # to the largest cluster that claims them (no duplicates).
+    assigned = np.zeros(burnt_mask.shape, dtype=np.int32)  # 0 = unassigned
 
     result = []
     for lbl in unique_lbls:
@@ -262,7 +262,7 @@ def find_clusters(burnt_mask, pixel_area_ha,
         if area_ha < min_area_ha:
             continue
 
-        # Solidity: calcolata sul seed (forma pulita dopo opening)
+        # Solidity: computed on the seed (clean shape after opening)
         if min_solidity and min_solidity > 0:
             try:
                 ys, xs = np.where(seed_cl)
@@ -277,20 +277,20 @@ def find_clusters(burnt_mask, pixel_area_ha,
                 solidity = 1.0
             if solidity < min_solidity:
                 logger.debug(
-                    "Cluster %d scartato: solidity=%.2f < %.2f (area=%.1f ha)",
+                    "Cluster %d discarded: solidity=%.2f < %.2f (area=%.1f ha)",
                     lbl, solidity, min_solidity, area_ha,
                 )
                 continue
 
-        # Recovery pixel di bordo: dilata il seed e intereca con burnt originale
+        # Border pixel recovery: dilate seed and intersect with original burnt mask
         if opening_radius_px > 0:
             expanded = binary_dilation(seed_cl, structure=kernel)
             event_mask = burnt_mask & expanded & (assigned == 0)
-            event_mask |= seed_cl  # i seed sono sempre inclusi
+            event_mask |= seed_cl  # seed pixels are always included
         else:
             event_mask = seed_cl
 
-        # Segna pixel assegnati per evitare duplicati con altri cluster
+        # Mark assigned pixels to avoid duplicates with other clusters
         assigned[event_mask] = lbl
         event_area_ha = float(event_mask.sum()) * pixel_area_ha
         result.append({"mask": event_mask, "area_ha": event_area_ha, "label_id": int(lbl)})
@@ -300,9 +300,9 @@ def find_clusters(burnt_mask, pixel_area_ha,
 
 
 def load_footprint_mask(event_id, output_dir):
-    """Carica la maschera burnt_count > 0 (footprint accumulato) per un evento.
+    """Load the burnt_count > 0 mask (accumulated footprint) for an event.
 
-    Returns np.ndarray bool o None se il file non esiste.
+    Returns np.ndarray bool or None if the file does not exist.
     """
     p = event_paths(event_id, output_dir)["burnt_count"]
     if not p.exists():
@@ -313,18 +313,18 @@ def load_footprint_mask(event_id, output_dir):
 
 
 # ---------------------------------------------------------------------------
-# API alto livello: open / update / close
+# High-level API: open / update / close
 # ---------------------------------------------------------------------------
 
 def open_event(burnt_mask, dnbr, valid_mask, profile, scene_meta,
                output_dir, tile, aoi):
-    """Apre un nuovo evento dalla prima scena con burnt sopra soglia.
+    """Open a new event from the first scene with burnt pixels above threshold.
 
     Returns
     -------
     event_id : str
     """
-    # event_id: {scene_ts}_EVT{N} -- N sequenziale per tile
+    # event_id: {scene_ts}_EVT{N} -- N sequential per tile
     alert_date = scene_meta.get("datetime", scene_meta.get("date", ""))
     _ts = _format_scene_ts(alert_date)
     idx = load_index(output_dir)
@@ -364,40 +364,40 @@ def open_event(burnt_mask, dnbr, valid_mask, profile, scene_meta,
 
 def update_event(event_id, burnt_mask, dnbr, valid_mask, profile, scene_meta,
                  output_dir):
-    """Aggiorna l'evento con una nuova scena valida.
+    """Update the event with a new valid scene.
 
-    - Incrementa obs_count su tutti i pixel validi.
-    - Incrementa burnt_count e aggiorna max_dnbr sui pixel bruciati.
-    - n_valid_scenes += 1 (UNA volta per scena, non per cluster).
+    - Increments obs_count on all valid pixels.
+    - Increments burnt_count and updates max_dnbr on burnt pixels.
+    - n_valid_scenes += 1 (ONCE per scene, not per cluster).
     """
     idx = load_index(output_dir)
     state = idx.get(event_id) or {}
     shape = tuple(state.get("shape") or burnt_mask.shape)
 
-    # Idempotency: se questa scena e' gia' stata registrata (crash/interrupt
-    # dopo save_index ma prima di update_watermark) non ri-incrementare.
+    # Idempotency: if this scene has already been recorded (crash/interrupt
+    # after save_index but before update_watermark) do not re-increment.
     _scene_id = scene_meta.get("stac_item_id")
     if _scene_id and any(s.get("scene_id") == _scene_id for s in state.get("scenes", [])):
         logger.debug(
-            "update_event %s: scena %s gia' registrata, skip (idempotency)",
+            "update_event %s: scene %s already recorded, skip (idempotency)",
             event_id, _scene_id,
         )
         return int(state.get("n_valid_scenes", 0))
 
     accs = load_accumulators(event_id, output_dir, shape)
 
-    # obs_count: +1 sui pixel SCL validi (saturazione a 255)
+    # obs_count: +1 on valid SCL pixels (saturates at 255)
     accs["obs_count"] = np.minimum(
         accs["obs_count"].astype(np.int16) + valid_mask.astype(np.int16), 255
     ).astype(np.uint8)
 
-    # burnt_count: +1 sui pixel bruciati validi
+    # burnt_count: +1 on valid burnt pixels
     burnt_valid = burnt_mask & valid_mask
     accs["burnt_count"] = np.minimum(
         accs["burnt_count"].astype(np.int16) + burnt_valid.astype(np.int16), 255
     ).astype(np.uint8)
 
-    # max_dnbr: aggiorna solo sui pixel bruciati validi se nuovo > vecchio
+    # max_dnbr: update only on valid burnt pixels where new value > current
     upd = burnt_valid & (dnbr.astype(np.float32) > accs["max_dnbr"])
     accs["max_dnbr"] = np.where(upd, dnbr.astype(np.float32), accs["max_dnbr"])
 
@@ -417,7 +417,7 @@ def update_event(event_id, burnt_mask, dnbr, valid_mask, profile, scene_meta,
     save_index(idx, output_dir)
 
     logger.debug(
-        "Aggiornato evento %s con scena %s (n_valid=%d, det=%s, +%d px burnt)",
+        "Updated event %s with scene %s (n_valid=%d, det=%s, +%d burnt px)",
         event_id, scene_meta.get("stac_item_id"), state["n_valid_scenes"],
         is_detection, int(burnt_valid.sum()),
     )
@@ -425,7 +425,7 @@ def update_event(event_id, burnt_mask, dnbr, valid_mask, profile, scene_meta,
 
 
 def should_close(event_id, output_dir, current_date=None):
-    """Restituisce (close: bool, reason: str|None)."""
+    """Return (close: bool, reason: str|None)."""
     state = load_index(output_dir).get(event_id)
     if state is None:
         return False, None
@@ -447,12 +447,12 @@ def should_close(event_id, output_dir, current_date=None):
                 ref_dt = ref_dt.replace(tzinfo=None)
             elapsed = (ref_dt - alert_dt).days
             n_valid = int(state.get("n_valid_scenes", 0))
-            # Soft timeout: si applica solo se abbiamo gia' abbastanza scene valide
-            # per poter raggiungere EVENT_MIN_DETECTIONS per i pixel bruciati.
-            # Se non bastano, la finestra si allunga fino all'hard cap.
+            # Soft timeout: applies only if we already have enough valid scenes
+            # to reach EVENT_MIN_DETECTIONS for burnt pixels.
+            # If not enough, the window extends until the hard cap.
             if elapsed >= config.EVENT_TIMEOUT_DAYS and n_valid >= config.EVENT_MIN_DETECTIONS:
                 return True, "timeout_days_reached"
-            # Hard cap assoluto: chiude sempre indipendentemente dalle scene valide.
+            # Absolute hard cap: always closes regardless of valid scene count.
             if elapsed >= config.EVENT_MAX_TIMEOUT_DAYS:
                 return True, "timeout_days_reached"
         except ValueError:
@@ -471,11 +471,10 @@ def mark_closed(event_id, output_dir, reason, closed_date=None):
 
 
 def purge_event(event_id, output_dir):
-    """Elimina la sidecar folder di un falso positivo.
+    """Delete the sidecar folder of a false positive event.
 
-    La voce nell'indice viene mantenuta con status='false_positive'
-    per preservare la sequenza EVT{N} ed evitare riassegnazioni di
-    numeri a eventi ancora aperti.
+    The index entry is kept with status='false_positive' to preserve
+    the EVT{N} sequence and avoid reassigning numbers to still-open events.
     """
     sidecar = event_dir(event_id, output_dir)
     if sidecar.exists():
@@ -486,22 +485,22 @@ def purge_event(event_id, output_dir):
         idx[event_id]["status"] = "false_positive"
         save_index(idx, output_dir)
 
-    logger.info("Evento %s eliminato (falso positivo)", event_id)
+    logger.info("Event %s removed (false positive)", event_id)
 
 
 # ---------------------------------------------------------------------------
-# Cluster contiguo: filtro apertura eventi
+# Contiguous cluster: event opening filter
 # ---------------------------------------------------------------------------
 
 def largest_cluster_area_ha(burnt_mask, pixel_area_ha):
-    """Area (ha) del piu' grande cluster contiguo (8-connessi) in burnt_mask.
+    """Area (ha) of the largest contiguous cluster (8-connected) in burnt_mask.
 
-    Serve a discriminare un vero incendio (cluster compatto) dal rumore
-    post-fire (pixel sparsi). Ritorna 0.0 se la maschera e' vuota.
+    Used to discriminate a real fire (compact cluster) from post-fire noise
+    (scattered pixels). Returns 0.0 if the mask is empty.
     """
     if not burnt_mask.any():
         return 0.0
-    structure = np.ones((3, 3), dtype=np.uint8)  # 8-connessi
+    structure = np.ones((3, 3), dtype=np.uint8)  # 8-connected
     labeled, n = label(burnt_mask, structure=structure)
     if n == 0:
         return 0.0

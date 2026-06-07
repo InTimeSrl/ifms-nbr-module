@@ -1,7 +1,7 @@
 """
-classify.py -- Classificazione severita' da dNBR/RBR (7 classi USGS).
+classify.py -- Severity classification from dNBR/RBR (7 USGS classes).
 
-Classi (da config.SEVERITY_CLASSES):
+Classes (from config.SEVERITY_CLASSES):
   1: Enhanced Regrowth, High    (dNBR < -0.251)
   2: Enhanced Regrowth, Low     (-0.251 <= dNBR < -0.101)
   3: Unburned                   (-0.101 <= dNBR <  0.099)
@@ -10,9 +10,9 @@ Classi (da config.SEVERITY_CLASSES):
   6: Moderate-High Severity     ( 0.439 <= dNBR <  0.659)
   7: High Severity              ( 0.659 <= dNBR)
 
-Pixel non validi (valid_mask=False) restano a 0 (nodata).
+Invalid pixels (valid_mask=False) remain at 0 (nodata).
 
-Usato da pipeline.py (process_scene) quando viene rilevato un incendio.
+Used by pipeline.py (process_scene) when a fire is detected.
 
 Ref: Key & Benson 2006, USGS FIREMON.
 """
@@ -23,19 +23,19 @@ from . import config
 
 
 def classify_severity(delta, valid_mask):
-    """Classifica la severita' pixel per pixel da dNBR (o RBR).
+    """Classify severity pixel-by-pixel from dNBR (or RBR).
 
     Parameters
     ----------
     delta : np.ndarray (float32)
-        Mappa dNBR o RBR (valori positivi = perdita vegetazione).
+        dNBR or RBR map (positive values = vegetation loss).
     valid_mask : np.ndarray (bool)
-        True = pixel valido, False = nuvola/ombra/nodata.
+        True = valid pixel, False = cloud/shadow/nodata.
 
     Returns
     -------
     np.ndarray (uint8)
-        Mappa di severita': 0 = nodata, 1-7 = classi USGS.
+        Severity map: 0 = nodata, 1-7 = USGS classes.
     """
     severity = np.zeros(delta.shape, dtype="uint8")
 

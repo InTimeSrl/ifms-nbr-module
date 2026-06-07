@@ -1,31 +1,29 @@
 """
-data_io.py -- I/O scene Sentinel-2, AOI, output raster/vector.
-Usa rasterio (GDAL) per raster, fiona per shapefile, JSON per metadati.
+data_io.py -- Sentinel-2 scene I/O, AOI loading, raster/vector output.
+Uses rasterio (GDAL) for rasters, fiona for shapefiles, JSON for metadata.
 
-Cartella di output:
-    Il percorso radice degli output si imposta tramite l'argomento --output-root
-    di run.py (default: "output/", relativa alla CWD del progetto).
-    Per cambiare la cartella di default in modo permanente, modificare in
-    src/pipeline.py la riga:
+Output folder:
+    The root output path is set via the --output-root argument of run.py
+    (default: "output/", relative to the project CWD).
+    To change the default folder permanently, edit in src/pipeline.py:
         "--output-root", default="output",
-    La struttura creata automaticamente e':
-        <output-root>/<nome_aoi>/data/      <- baseline_nbr, previous_nbr, pipeline_state.json
-        <output-root>/<nome_aoi>/products/  <- GeoPackage, severity_final.tif, ...
+    The directory structure created automatically is:
+        <output-root>/<aoi_name>/data/      <- baseline_nbr, previous_nbr, pipeline_state.json
+        <output-root>/<aoi_name>/products/  <- GeoPackage, severity_final.tif, ...
 
-Parallelismo AOI (opzione consigliata):
-    Le AOI sono completamente indipendenti su disco (data_dir e output_dir
-    separate per nome AOI). Per processarle in parallelo senza modifiche al
-    codice e' sufficiente lanciare processi OS separati usando il flag --aoi:
+AOI parallelism (recommended approach):
+    AOIs are fully independent on disk (separate data_dir and output_dir
+    per AOI name). To process them in parallel, launch separate OS processes
+    using the --aoi flag:
 
-        # Linux: avvia N AOI in parallelo, ognuna con il proprio log
+        # Linux: start N AOIs in parallel, each with its own log
         python run.py --aoi AOI_A > output_AOI_A.log 2>&1 &
         python run.py --aoi AOI_B > output_AOI_B.log 2>&1 &
 
-    Nessun lock necessario: pipeline_state.json, events_index.json e i raster
-    NBR sono tutti per-tile/per-AOI.
-    N.B.: Possibile collo di bottiglia sulla
-    banda di rete verso il provider STAC/COG: piu' di 3-4 AOI
-    simultanee potrebbero portare a saturazione la connessione o incorrere in rate limiting.
+    No locking needed: pipeline_state.json, events_index.json and NBR rasters
+    are all per-tile/per-AOI.
+    Note: network bandwidth to the STAC/COG provider may be a bottleneck;
+    more than 3-4 simultaneous AOIs may saturate the connection or hit rate limits.
 """
 
 import json
@@ -49,40 +47,39 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Configurazione GDAL Virtual File Systems per lettura COG remoti
+# GDAL Virtual File System configuration for remote COG reading
 # Ref: https://gdal.org/en/stable/user/virtual_file_systems.html
 #
-# /vsicurl/  -> lettura HTTP/HTTPS (AWS Element84, CDSE)
-# /vsis3/    -> lettura S3 diretta (STAC interno, MinIO)
+# /vsicurl/  -> HTTP/HTTPS reading (AWS Element84, CDSE)
+# /vsis3/    -> direct S3 reading (internal STAC, MinIO)
 #
-# rasterio.open() attiva automaticamente il VFS appropriato in base
-# al protocollo dell'URL (https:// -> vsicurl, s3:// -> vsis3).
-# Le opzioni sotto sono ottimizzate per COG con range requests.
+# rasterio.open() activates the appropriate VFS automatically based on
+# the URL scheme (https:// -> vsicurl, s3:// -> vsis3).
+# The options below are tuned for COG range requests.
 # ---------------------------------------------------------------------------
 
 def configure_gdal_vfs():
-    """Imposta le variabili d'ambiente GDAL per lettura di COG remoti."""
+    """Set GDAL environment variables for remote COG reading."""
     gdal_opts = {
-        # Disabilita la scansione della directory remota all'apertura
+        # Disable remote directory scan on open
         "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
-        # Restringe vsicurl alle sole estensioni .tif/.tiff
+        # Restrict vsicurl to .tif/.tiff extensions only
         "CPL_VSIL_CURL_ALLOWED_EXTENSIONS": ".tif,.tiff",
-        # Unisce range request HTTP adiacenti in un'unica richiesta
+        # Merge adjacent HTTP range requests into a single request
         "GDAL_HTTP_MERGE_CONSECUTIVE_RANGES": "YES",
         "CPL_VSIL_CURL_CACHE_SIZE": "67108864",  # 64 MB cache
-        # Accesso anonimo per bucket S3 pubblici (Element84).
-        # TODO (STAC interno / MinIO): sostituire con:
-        #   "AWS_S3_ENDPOINT":     "<host:porta>",   # es. "minio.internal:9000"
-        #   "AWS_VIRTUAL_HOSTING": "FALSE",           # MinIO usa path-style URL (non virtual-hosted)
-        #   "AWS_HTTPS":           "NO",              # solo se il MinIO non usa TLS
-        # Se invece ha TLS con certificato self-signed, lasciare AWS_HTTPS=YES e aggiungere:
-        #   "GDAL_HTTP_UNSAFESSL": "YES"              # disabilita la verifica del certificato TLS:
-        #                                             # accetta cert. self-signed/scaduti/CN errato
-        # Rimuovere la riga:
-        #   "AWS_NO_SIGN_REQUEST" (bucket con richieste firmate).
-        # Le credenziali (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY) NON vanno nel codice:
-        # GDAL/vsis3 le legge automaticamente dall'ambiente del processo.
-        # Gli altri quattro parametri (GDAL_DISABLE_READDIR_ON_OPEN, ecc.) dovrebbero rimanere invariati.
+        # Anonymous access for public S3 buckets (Element84).
+        # TODO (internal STAC / MinIO): replace with:
+        #   "AWS_S3_ENDPOINT":     "<host:port>",    # e.g. "minio.internal:9000"
+        #   "AWS_VIRTUAL_HOSTING": "FALSE",           # MinIO uses path-style URLs
+        #   "AWS_HTTPS":           "NO",              # only if MinIO does not use TLS
+        # If MinIO uses TLS with a self-signed certificate, keep AWS_HTTPS=YES and add:
+        #   "GDAL_HTTP_UNSAFESSL": "YES"              # skip TLS certificate verification
+        # Remove the line:
+        #   "AWS_NO_SIGN_REQUEST" (for buckets requiring signed requests).
+        # Credentials (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY) must NOT be hardcoded:
+        # GDAL/vsis3 reads them automatically from the process environment.
+        # The other four parameters (GDAL_DISABLE_READDIR_ON_OPEN, etc.) should remain unchanged.
         "AWS_NO_SIGN_REQUEST": "YES",
     }
     for key, val in gdal_opts.items():
@@ -93,38 +90,38 @@ configure_gdal_vfs()
 
 
 # ---------------------------------------------------------------------------
-# Lettura metadati
+# Metadata loading
 # ---------------------------------------------------------------------------
 
 def load_metadata(json_path):
-    """Carica il JSON di metadati di una scena.
+    """Load the JSON metadata file for a scene.
 
     Parameters
     ----------
-    json_path : str o Path
-        Percorso al file *_metadata.json.
+    json_path : str or Path
+        Path to the *_metadata.json file.
 
     Returns
     -------
     dict
-        Contenuto del JSON.
+        Parsed JSON content.
     """
     with open(json_path, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
 def list_scenes(tile_dir):
-    """Elenca tutte le scene (JSON) in una cartella tile.
+    """List all scenes (JSON metadata files) in a tile folder.
 
     Parameters
     ----------
-    tile_dir : str o Path
-        Cartella contenente i file di una o piu' scene.
+    tile_dir : str or Path
+        Folder containing one or more scene files.
 
     Returns
     -------
     list[dict]
-        Lista di metadati, ordinata per datetime.
+        List of metadata dicts, sorted by datetime.
     """
     tile_dir = Path(tile_dir)
     scenes = []
@@ -135,24 +132,24 @@ def list_scenes(tile_dir):
 
 
 # ---------------------------------------------------------------------------
-# Lettura bande raster
+# Raster band reading
 # ---------------------------------------------------------------------------
 
 def _resolve_href(meta, asset_key):
-    """Restituisce il percorso/URL della banda da aprire con rasterio.
+    """Return the path or URL of a band asset to open with rasterio.
 
-    Se l'href e' un URL remoto (http/s3), lo restituisce cosi' com'e'.
-    Se e' un path relativo o locale, lo lascia invariato (rasterio lo gestisce).
+    Remote URLs (http/s3) are returned as-is.
+    Local or relative paths are returned unchanged (rasterio handles them).
     """
     asset = meta["assets"][asset_key]
     return asset["href"]
 
 
 def _local_path(meta, asset_key, scene_dir):
-    """Costruisce il path locale del TIF a partire da metadati e cartella.
+    """Build the local TIF path from metadata and scene folder.
 
-    Usato come fallback quando l'href punta a un URL remoto ma il file
-    e' gia' presente su disco (es. dati di test scaricati).
+    Used as a fallback when the href points to a remote URL but the file
+    already exists on disk (e.g. downloaded test data).
     """
     item_id = meta["stac_item_id"]
     band_name = meta["assets"][asset_key]["band_name"]
@@ -160,12 +157,12 @@ def _local_path(meta, asset_key, scene_dir):
 
 
 def _resolve_source(meta, asset_key, scene_dir):
-    """Restituisce il path effettivo di una banda.
+    """Return the effective path for a band asset.
 
-    Logica di risoluzione:
-    1. Se scene_dir e' fornito e il file locale esiste -> path locale
-    2. Altrimenti -> href dal JSON STAC (URL HTTP o s3://)
-       rasterio/GDAL lo apre via /vsicurl/ o /vsis3/ automaticamente.
+    Resolution logic:
+    1. If scene_dir is provided and the local file exists -> local path
+    2. Otherwise -> href from the STAC JSON (HTTP URL or s3://)
+       rasterio/GDAL opens it via /vsicurl/ or /vsis3/ automatically.
     """
     if scene_dir is not None:
         local = _local_path(meta, asset_key, scene_dir)
@@ -176,19 +173,19 @@ def _resolve_source(meta, asset_key, scene_dir):
 
 
 def get_scene_crs(meta, scene_dir=None):
-    """Restituisce il CRS di una scena leggendo l'header della prima banda raster.
+    """Return the CRS of a scene by reading the header of the first raster band.
 
     Parameters
     ----------
     meta : dict
-        Metadati della scena.
-    scene_dir : str o Path, optional
-        Cartella locale dei TIF. Se None, legge da remoto (COG via VFS).
+        Scene metadata.
+    scene_dir : str or Path, optional
+        Local TIF folder. If None, reads remotely (COG via VFS).
 
     Returns
     -------
     str
-        CRS come stringa (es. "EPSG:32634").
+        CRS as a string (e.g. "EPSG:32634").
     """
     source = _resolve_source(meta, "nir08", scene_dir)
     with rasterio.open(source) as src:
@@ -196,29 +193,29 @@ def get_scene_crs(meta, scene_dir=None):
 
 
 def read_band(source, bbox=None):
-    """Legge una singola banda raster.
+    """Read a single raster band.
 
     Parameters
     ----------
     source : str
-        Path locale, URL HTTP o S3 del file raster.
+        Local path, HTTP URL, or S3 URL of the raster file.
     bbox : tuple, optional
-        (xmin, ymin, xmax, ymax) per ritaglio spaziale. Deve essere
-        nello stesso CRS del raster. Se None, legge l'intero tile.
+        (xmin, ymin, xmax, ymax) for spatial clipping. Must be in the
+        same CRS as the raster. If None, reads the entire tile.
 
     Returns
     -------
     data : np.ndarray
-        Array 2D (height, width), dtype originale (uint16 o uint8).
+        2D array (height, width), original dtype (uint16 or uint8).
     profile : dict
-        Profilo rasterio (CRS, transform, dtype, ecc.).
+        Rasterio profile (CRS, transform, dtype, etc.).
     """
     with rasterio.open(source) as src:
         if bbox is not None:
             window = from_bounds(*bbox, transform=src.transform)
-            # Clamp alla griglia pixel intera e ai limiti del raster.
-            # from_bounds può produrre offset negativi o fuori extent
-            # se il bbox è più grande del tile.
+            # Clamp to integer pixel grid and raster extent.
+            # from_bounds may produce negative offsets or out-of-extent windows
+            # when the bbox is larger than the tile.
             int_window = window.round_offsets().round_lengths()
             int_window = int_window.intersection(
                 Window(0, 0, src.width, src.height)
@@ -238,30 +235,30 @@ def read_band(source, bbox=None):
 
 
 def load_scene_bands(meta, scene_dir=None, asset_keys=None, bbox=None):
-    """Carica tutte le bande di una scena come dizionario di array.
+    """Load all bands for a scene as a dictionary of arrays.
 
-    Supporta lettura locale (scene_dir) o remota (COG via GDAL VFS).
-    Se scene_dir e' None, i raster vengono letti direttamente dall'href
-    STAC tramite /vsicurl/ (HTTP) o /vsis3/ (S3).
+    Supports local reading (scene_dir) or remote reading (COG via GDAL VFS).
+    If scene_dir is None, rasters are read directly from the STAC href
+    via /vsicurl/ (HTTP) or /vsis3/ (S3).
 
     Parameters
     ----------
     meta : dict
-        Metadati della scena (da load_metadata).
-    scene_dir : str o Path, optional
-        Cartella locale dei TIF. Se None, legge da remoto.
+        Scene metadata (from load_metadata).
+    scene_dir : str or Path, optional
+        Local TIF folder. If None, reads remotely.
     asset_keys : list[str], optional
-        Chiavi asset da caricare (es. ["nir08", "swir22", "scl"]).
-        Se None, carica tutte le bande in config.BANDS.
+        Asset keys to load (e.g. ["nir08", "swir22", "scl"]).
+        If None, loads all bands defined in config.BANDS.
     bbox : tuple, optional
-        Ritaglio spaziale (xmin, ymin, xmax, ymax) nel CRS del raster.
+        Spatial clip (xmin, ymin, xmax, ymax) in the raster CRS.
 
     Returns
     -------
     bands : dict[str, np.ndarray]
-        Dizionario {asset_key: array 2D}.
+        Dictionary {asset_key: 2D array}.
     profile : dict
-        Profilo rasterio (dalla prima banda letta).
+        Rasterio profile (from the first band read).
     """
     if asset_keys is None:
         asset_keys = list(config.BANDS.keys())
@@ -285,20 +282,20 @@ def load_scene_bands(meta, scene_dir=None, asset_keys=None, bbox=None):
 
 
 # ---------------------------------------------------------------------------
-# Scrittura output
+# Output writing
 # ---------------------------------------------------------------------------
 
 def _write_tiff(out_path, profile, write_fn):
-    """Primitiva interna: scrive su file temporaneo e sostituisce out_path (pattern tmp->replace).
+    """Internal primitive: write to a temp file then replace out_path (tmp->replace pattern).
 
     Parameters
     ----------
     out_path : Path
-        Percorso di destinazione (la directory deve esistere).
+        Destination path (directory must exist).
     profile : dict
-        Profilo rasterio per il file di output.
+        Rasterio profile for the output file.
     write_fn : callable
-        ``write_fn(dst)`` scrive i dati nel dataset rasterio aperto.
+        ``write_fn(dst)`` writes data into the open rasterio dataset.
     """
     tmp_path = out_path.with_suffix(".tmp.tif")
     tmp_path.unlink(missing_ok=True)
@@ -315,20 +312,20 @@ def _write_tiff(out_path, profile, write_fn):
 
 
 def write_geotiff(data, profile, out_path, dtype=None, nodata=None):
-    """Salva un array 2D come GeoTIFF.
+    """Save a 2D array as a GeoTIFF.
 
     Parameters
     ----------
     data : np.ndarray
-        Array 2D da salvare.
+        2D array to save.
     profile : dict
-        Profilo rasterio (CRS, transform, ecc.).
-    out_path : str o Path
-        Percorso di output.
+        Rasterio profile (CRS, transform, etc.).
+    out_path : str or Path
+        Output path.
     dtype : str, optional
-        Tipo dato output (es. "float32", "uint8"). Se None, usa quello di data.
+        Output data type (e.g. "float32", "uint8"). If None, uses data.dtype.
     nodata : number, optional
-        Valore nodata. Se None, usa config.NODATA_OUTPUT.
+        Nodata value. If None, uses config.NODATA_OUTPUT.
     """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -351,18 +348,18 @@ def write_geotiff(data, profile, out_path, dtype=None, nodata=None):
 
 
 def write_rgb_geotiff(data, profile, out_path, nodata=None):
-    """Salva un array (3, H, W) come GeoTIFF RGB (uint8).
+    """Save a (3, H, W) array as an RGB GeoTIFF (uint8).
 
     Parameters
     ----------
     data : np.ndarray
-        Array 3D (3, height, width) con bande R, G, B (uint8, 0-255).
+        3D array (3, height, width) with R, G, B bands (uint8, 0-255).
     profile : dict
-        Profilo rasterio (CRS, transform, ecc.).
-    out_path : str o Path
-        Percorso di output.
+        Rasterio profile (CRS, transform, etc.).
+    out_path : str or Path
+        Output path.
     nodata : int, optional
-        Valore nodata. Se None, non imposta nodata sul GeoTIFF.
+        Nodata value. If None, no nodata is set on the GeoTIFF.
     """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -386,20 +383,20 @@ def write_rgb_geotiff(data, profile, out_path, nodata=None):
 
 
 def write_geopackage(features, out_path, crs=None, layer_name="burnt"):
-    """Salva una lista di feature in un GeoPackage (.gpkg).
+    """Save a list of features to a GeoPackage (.gpkg).
 
-    Tipo geometria fissato a MultiPolygon
+    Geometry type is fixed to MultiPolygon.
 
     Parameters
     ----------
     features : list[dict]
-        Lista di feature in formato GeoJSON-like (geometry + properties).
-    out_path : str o Path
-        Percorso del file .gpkg di output (sovrascritto se esistente).
+        Features in GeoJSON-like format (geometry + properties).
+    out_path : str or Path
+        Output .gpkg path (overwritten if it exists).
     crs : str, optional
-        Codice EPSG (es. "EPSG:32635"). Se None, nessun CRS scritto.
+        EPSG code (e.g. "EPSG:32635"). If None, no CRS is written.
     layer_name : str
-        Nome del layer all'interno del GeoPackage.
+        Layer name inside the GeoPackage.
     """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -407,8 +404,8 @@ def write_geopackage(features, out_path, crs=None, layer_name="burnt"):
     if not features:
         return
 
-    # Costruisce schema dalle proprieta' della prima feature.
-    # I tipi fiona supportati: int, float, str, bool, date, datetime.
+    # Build schema from the properties of the first feature.
+    # Supported fiona types: int, float, str, bool, date, datetime.
     sample_props = features[0].get("properties", {}) or {}
     prop_schema = {}
     for key, val in sample_props.items():
@@ -423,9 +420,9 @@ def write_geopackage(features, out_path, crs=None, layer_name="burnt"):
 
     schema = {"geometry": "MultiPolygon", "properties": prop_schema}
 
-    # fiona in modalita' "w" su GPKG esistente appende invece di sovrascrivere:
-    # su run ripetuti (es. restart dopo interruzione) il layer si duplicherebbe.
-    # Rimuove solo il layer target; gli altri layer del file restano intatti.
+    # fiona in "w" mode on an existing GPKG appends instead of overwriting:
+    # on repeated runs (e.g. restart after interruption) the layer would be duplicated.
+    # Remove only the target layer; other layers in the file are left intact.
     if out_path.exists():
         try:
             if layer_name in fiona.listlayers(str(out_path)):
@@ -444,10 +441,10 @@ def write_geopackage(features, out_path, crs=None, layer_name="burnt"):
             geom = feat.get("geometry")
             if geom is None:
                 continue
-            # Promuovi Polygon -> MultiPolygon per uniformita' di schema
+            # Promote Polygon -> MultiPolygon for schema consistency
             if geom.get("type") == "Polygon":
                 geom = {"type": "MultiPolygon", "coordinates": [geom["coordinates"]]}
-            # Coerce property values al tipo dichiarato (None resta None).
+            # Coerce property values to declared type (None stays None).
             props = {}
             for key, decl in prop_schema.items():
                 v = feat.get("properties", {}).get(key)
@@ -461,50 +458,50 @@ def write_geopackage(features, out_path, crs=None, layer_name="burnt"):
 
 
 # ---------------------------------------------------------------------------
-# Lettura AOI
+# AOI loading
 # ---------------------------------------------------------------------------
-# Le AOI vengono scoperte automaticamente da pipeline.py (_scan_aois) che
-# scansiona la cartella AOIs/ (o quella passata con --aois-root).
-# Struttura attesa:
+# AOIs are discovered automatically by pipeline.py (_scan_aois), which
+# scans the AOIs/ folder (or the path passed via --aois-root).
+# Expected structure:
 #
 #   AOIs/
-#     <nome_aoi>/
-#       <file_vettoriale>.<ext>    <- .geojson | .gpkg | .shp | .kml | .gml
+#     <aoi_name>/
+#       <vector_file>.<ext>    <- .geojson | .gpkg | .shp | .kml | .gml
 #
-# Per aggiungere una nuova AOI: creare una sottocartella in AOIs/ e
-# inserirvi un file vettoriale in uno dei formati supportati.
-# Il nome della sottocartella diventa l'identificatore AOI usato nei log,
-# nei path di output e nel flag --aoi.
+# To add a new AOI: create a subfolder under AOIs/ and place a vector
+# file in one of the supported formats inside it.
+# The subfolder name becomes the AOI identifier used in logs, output
+# paths, and the --aoi flag.
 #
-# Per cambiare la cartella di default: usare --aois-root <path> a riga di
-# comando, oppure modificare il default in pipeline.py:
+# To change the default AOI folder: use --aois-root <path> on the
+# command line, or change the default in pipeline.py:
 #   p.add_argument("--aois-root", default="AOIs", ...)
 #
-# Il file vettoriale può contenere qualsiasi geometria (Polygon,
-# MultiPolygon); viene letta solo la prima feature. Il CRS può essere
-# qualsiasi proiezione leggibile da Fiona — la pipeline riproietta
-# internamente in WGS84 per le query STAC.
+# The vector file can contain any geometry (Polygon, MultiPolygon);
+# only the first feature is read. The CRS can be any projection
+# readable by Fiona -- the pipeline reprojects internally to WGS84
+# for STAC queries.
 # ---------------------------------------------------------------------------
 
 def load_aoi(path):
-    """Carica un'AOI da un file vettoriale e restituisce geometria + bbox.
+    """Load an AOI from a vector file and return geometry + bbox.
 
-    Supporta qualsiasi formato leggibile da Fiona (Shapefile, GeoJSON,
-    GeoPackage, KML, ecc.). Per i formati multi-layer (es. GeoPackage)
-    viene aperto il primo layer.
+    Supports any format readable by Fiona (Shapefile, GeoJSON,
+    GeoPackage, KML, etc.). For multi-layer formats (e.g. GeoPackage)
+    the first layer is opened.
 
     Parameters
     ----------
-    path : str o Path
-        Percorso al file vettoriale dell'AOI.
+    path : str or Path
+        Path to the AOI vector file.
 
     Returns
     -------
-    dict con chiavi:
-        name : str -- nome AOI (dal campo 'Name' o dal nome cartella)
-        geometry : shapely.geometry -- geometria nel CRS nativo del file
-        bbox : tuple -- (xmin, ymin, xmax, ymax) nel CRS nativo
-        crs : str -- CRS del file (es. EPSG:4326 o EPSG:32634)
+    dict with keys:
+        name : str -- AOI name (from 'Name' field or parent folder name)
+        geometry : shapely.geometry -- geometry in the file's native CRS
+        bbox : tuple -- (xmin, ymin, xmax, ymax) in the native CRS
+        crs : str -- file CRS (e.g. EPSG:4326 or EPSG:32634)
     """
     path = Path(path)
     with fiona.open(path) as src:
@@ -522,25 +519,25 @@ def load_aoi(path):
 
 
 # ---------------------------------------------------------------------------
-# Gestione CRS / riproiezione
+# CRS handling / reprojection
 # ---------------------------------------------------------------------------
 
 def reproject_bbox(bbox, src_crs, dst_crs):
-    """Riproietta un bounding box da src_crs a dst_crs.
+    """Reproject a bounding box from src_crs to dst_crs.
 
     Parameters
     ----------
     bbox : tuple
-        (xmin, ymin, xmax, ymax) nel CRS sorgente.
+        (xmin, ymin, xmax, ymax) in the source CRS.
     src_crs : str
-        CRS sorgente.
+        Source CRS.
     dst_crs : str
-        CRS destinazione.
+        Destination CRS.
 
     Returns
     -------
     tuple
-        (xmin, ymin, xmax, ymax) nel CRS destinazione.
+        (xmin, ymin, xmax, ymax) in the destination CRS.
     """
     if _crs_equal(src_crs, dst_crs):
         return bbox
@@ -551,12 +548,12 @@ def reproject_bbox(bbox, src_crs, dst_crs):
 
 
 def get_aoi_bbox_wgs84(aoi):
-    """Restituisce il bbox dell'AOI in WGS 84, per query STAC.
+    """Return the AOI bbox in WGS 84 for STAC queries.
 
     Parameters
     ----------
     aoi : dict
-        AOI dict (da load_aoi).
+        AOI dict (from load_aoi).
 
     Returns
     -------
@@ -567,34 +564,34 @@ def get_aoi_bbox_wgs84(aoi):
 
 
 def get_aoi_bbox_raster(aoi, raster_crs):
-    """Restituisce il bbox dell'AOI nel CRS del raster, per ritaglio.
+    """Return the AOI bbox in the raster CRS for spatial clipping.
 
     Parameters
     ----------
     aoi : dict
-        AOI dict (da load_aoi).
+        AOI dict (from load_aoi).
     raster_crs : str
-        CRS del raster Sentinel-2 (es. "EPSG:32634").
+        Sentinel-2 raster CRS (e.g. "EPSG:32634").
 
     Returns
     -------
     tuple
-        (xmin, ymin, xmax, ymax) nel CRS del raster.
+        (xmin, ymin, xmax, ymax) in the raster CRS.
     """
     return reproject_bbox(aoi["bbox"], aoi["crs"], raster_crs)
 
 
 def _crs_equal(crs_a, crs_b):
-    """Confronto normalizzato tra stringhe CRS (case-insensitive, senza spazi)."""
+    """Normalised CRS string comparison (case-insensitive, no spaces)."""
     return crs_a.upper().replace(" ", "") == crs_b.upper().replace(" ", "")
 
 
 # ---------------------------------------------------------------------------
-# STAC: query catalogo e conversione metadati
+# STAC: catalogue query and metadata conversion
 # ---------------------------------------------------------------------------
 
 def _stac_item_to_meta(item):
-    """Converte un STAC Item in dict metadati compatibile con la pipeline."""
+    """Convert a STAC Item into a pipeline-compatible metadata dict."""
     props = item.properties
     assets = {}
     for stac_key, band_name in config.BANDS.items():
@@ -621,10 +618,10 @@ def _stac_item_to_meta(item):
 
 def query_stac(bbox_wgs84, date_from, date_to, stac_url, collection,
                max_items=2000):
-    """Esegue una query STAC e restituisce la lista di metadati scena."""
+    """Run a STAC query and return a list of scene metadata dicts."""
     catalog = Client.open(stac_url)
     date_range = "%s/%s" % (date_from, date_to)
-    logger.info("Query STAC: bbox=%s  date=%s", bbox_wgs84, date_range)
+    logger.info("STAC query: bbox=%s  date=%s", bbox_wgs84, date_range)
     results = catalog.search(
         collections=[collection],
         bbox=list(bbox_wgs84),
@@ -632,72 +629,71 @@ def query_stac(bbox_wgs84, date_from, date_to, stac_url, collection,
         max_items=max_items,
     )
     items = list(results.items())
-    logger.info("STAC: trovate %d scene", len(items))
+    logger.info("STAC: found %d scenes", len(items))
     return [_stac_item_to_meta(it) for it in items]
 
 
 def _get_scenes_stac(aoi, stac_client, date_from=None):
-    """Recupera scene da un catalogo STAC.
+    """Retrieve scenes from a STAC catalogue.
 
-    TODO: implementare quando il server STAC interno sara' disponibile.
+    TODO: implement when the internal STAC server is available.
     """
-    raise NotImplementedError("Query STAC non ancora implementata")
+    raise NotImplementedError("STAC query not yet implemented")
 
 
 def get_scenes(aoi, scene_dir=None, stac_client=None, date_from=None):
-    """Recupera le scene disponibili per un'AOI (locale o STAC).
+    """Retrieve available scenes for an AOI (local or STAC).
 
-    Una tra scene_dir e stac_client deve essere fornita.
+    Either scene_dir or stac_client must be provided.
     """
     if scene_dir is not None:
         return list_scenes(scene_dir)
     elif stac_client is not None:
         return _get_scenes_stac(aoi, stac_client, date_from)
     else:
-        raise ValueError("Specificare scene_dir (locale) o stac_client (remoto)")
+        raise ValueError("Provide either scene_dir (local) or stac_client (remote)")
 
 
 # ---------------------------------------------------------------------------
-# Salvataggio output scena
+# Scene output saving
 # ---------------------------------------------------------------------------
 
 def save_scene_outputs(result, scene, aoi, output_dir, scene_dir=None,
                        event_ids=None, tile_id=None, scene_ts=None,
                        aoi_crop=None, aoi_mask=None):
-    """Salva i prodotti preliminari di una scena: dNBR, severity, GeoPackage e
-    RGB opzionale (suffisso ``_prelim``; perimetrazione finale da ``end_event``).
+    """Save preliminary scene products: dNBR, severity, GeoPackage and
+    optional RGB (suffix ``_prelim``; final perimeter produced by ``end_event``).
 
     Parameters
     ----------
     result : dict
-        Output di process_scene (con fire_detected=True).
+        Output from process_scene (with fire_detected=True).
     scene : dict
-        Metadati della scena.
+        Scene metadata.
     aoi : dict
         AOI dict.
     output_dir : str
-        Cartella radice output.
-    scene_dir : str o Path, optional
-        Cartella locale dei TIF (necessaria per produrre RGB).
+        Root output folder.
+    scene_dir : str or Path, optional
+        Local TIF folder (required to produce RGB).
     event_ids : str, optional
-        Event ID toccato dalla scena; usato come nome cartella e layer GPKG.
+        Event ID touched by the scene; used as the folder name and GPKG layer name.
     tile_id : str, optional
-        Tile MGRS (es. T35SMC), salvato come proprieta' nel GeoPackage.
+        MGRS tile (e.g. T35SMC), saved as a property in the GeoPackage.
     scene_ts : str, optional
-        Timestamp della scena formattato (da events._format_scene_ts); usato
-        come prefisso file e nome layer quando event_ids e' fornito.
+        Formatted scene timestamp (from events._format_scene_ts); used as
+        file prefix and layer name when event_ids is provided.
     aoi_crop : tuple, optional
-        Finestra di ritaglio (row_off, col_off, nrows, ncols) sul grid tile.
-        Se fornita, i raster di output vengono ritagliati al bounding box AOI.
+        Crop window (row_off, col_off, nrows, ncols) on the tile grid.
+        If provided, output rasters are clipped to the AOI bounding box.
     aoi_mask : np.ndarray (bool), optional
-        Maschera pixel interni all'AOI. I pixel esterni vengono azzerati
-        prima del salvataggio.
+        Mask of pixels inside the AOI. Pixels outside are zeroed before saving.
     """
     from . import postprocess  # local import: postprocess importa data_io
 
     scene_id = scene["stac_item_id"]
     if event_ids and scene_ts:
-        # Sidecar folder condiviso per tutte le scene dell'evento.
+        # Shared sidecar folder for all scenes of the event.
         evt_part = event_ids.split("_")[-1] if "_EVT" in event_ids else event_ids
         out_dir = Path(output_dir) / event_ids
         gpkg_path = Path(output_dir) / f"{event_ids}.gpkg"
@@ -712,14 +708,14 @@ def save_scene_outputs(result, scene, aoi, output_dir, scene_dir=None,
     _dnbr = result.get("dnbr")
     _severity = result.get("severity")
 
-    # Azzera pixel fuori AOI (nodata): applica maschera PRIMA del crop
+    # Zero pixels outside the AOI (nodata): apply mask BEFORE crop
     if aoi_mask is not None:
         if _dnbr is not None and _dnbr.shape == aoi_mask.shape:
             _dnbr = np.where(aoi_mask, _dnbr, np.nan).astype(np.float32)
         if _severity is not None and _severity.shape == aoi_mask.shape:
             _severity = np.where(aoi_mask, _severity, 0).astype(_severity.dtype)
 
-    # Ritaglia al bounding box dell'AOI sul grid tile
+    # Clip to AOI bounding box on the tile grid
     if aoi_crop is not None:
         _r0, _c0, _nrows, _ncols = aoi_crop
         _win = _rwin.Window(_c0, _r0, _ncols, _nrows)
@@ -730,14 +726,14 @@ def save_scene_outputs(result, scene, aoi, output_dir, scene_dir=None,
         if _severity is not None:
             _severity = _severity[_r0:_r0 + _nrows, _c0:_c0 + _ncols]
 
-    # dNBR preliminare
+    # Preliminary dNBR raster
     write_geotiff(
         _dnbr, profile,
         out_dir / f"{raster_pfx}_dNBR.tif",
         dtype="float32",
     )
 
-    # Severity raster preliminare
+    # Preliminary severity raster
     if _severity is not None:
         write_geotiff(
             _severity, profile,
@@ -746,7 +742,7 @@ def save_scene_outputs(result, scene, aoi, output_dir, scene_dir=None,
             nodata=0,
         )
 
-    # Poligoni GeoPackage preliminari (CRS nativo)
+    # Preliminary GeoPackage polygons (native CRS)
     if _severity is not None and _dnbr is not None:
         meta = {
             "event_id": event_ids or "",
@@ -769,7 +765,7 @@ def save_scene_outputs(result, scene, aoi, output_dir, scene_dir=None,
             layer_name=layer_name_prelim,
         )
 
-    # RGB composito Highlight Optimized Natural Color (opzionale)
+    # Optional RGB Highlight Optimized Natural Color composite
     if config.PRODUCE_RGB:
         postprocess.save_rgb_composite(scene, aoi, scene_dir, out_dir)
 

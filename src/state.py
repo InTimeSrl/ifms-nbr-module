@@ -1,15 +1,16 @@
 """
-state.py -- Tracciamento stato pipeline per singola AOI/tile.
+state.py -- Pipeline state tracking for a single AOI/tile.
 
-Persiste un file JSON in <data_dir>/pipeline_state.json con:
-  - baseline          : flag di costruzione + metadati (n. scene, copertura, ...)
-  - last_processed_dt : ISO 8601 datetime dell'ultima scena processata
-                        (watermark per la query STAC: si recuperano solo scene
-                        con datetime > watermark, senza tracciare ogni scene_id)
+Persists a JSON file at <data_dir>/pipeline_state.json with:
+  - baseline          : build flag + metadata (n. scenes, coverage, ...)
+  - last_processed_dt : ISO 8601 datetime of the last processed scene
+                        (watermark for the STAC query: only scenes with
+                        datetime > watermark are retrieved, without tracking
+                        individual scene IDs)
 
-Il file viene creato al primo run e aggiornato incrementalmente a ogni
-esecuzione; in modalita' continua il sistema parte sempre dall'ultima scena
-vista e processa solo le nuove.
+The file is created on the first run and updated incrementally on each
+execution; in continuous mode the system always starts from the last scene
+seen and processes only new ones.
 """
 
 import json
@@ -24,50 +25,50 @@ logger = logging.getLogger(__name__)
 STATE_FILENAME = "pipeline_state.json"
 
 # ---------------------------------------------------------------------------
-# I/O base
+# Base I/O
 # ---------------------------------------------------------------------------
 
 def state_path(data_dir):
-    """Restituisce il Path del file JSON di stato per un data_dir."""
+    """Return the Path of the state JSON file for a data_dir."""
     return Path(data_dir) / STATE_FILENAME
 
 
 def load_state(data_dir):
-    """Carica lo stato dal JSON.
+    """Load state from the JSON file.
 
-    Se config.FORCE_REPROCESS e' True restituisce sempre uno stato vuoto,
-    forzando il ricalcolo completo (baseline + tutte le scene).
-    Se il file non esiste restituisce uno stato vuoto con struttura valida.
-    Non solleva eccezioni: un JSON corrotto viene loggato e ignorato
-    (restituisce stato vuoto, costringendo il pipeline a ripartire da zero).
+    If config.FORCE_REPROCESS is True, always returns an empty state,
+    forcing a full recompute (baseline + all scenes).
+    If the file does not exist, returns an empty state with a valid structure.
+    Does not raise exceptions: a corrupted JSON is logged and ignored
+    (returns empty state, forcing the pipeline to restart from scratch).
     """
     if config.FORCE_REPROCESS:
-        logger.info("FORCE_REPROCESS=True: stato JSON ignorato, riprocessing completo")
+        logger.info("FORCE_REPROCESS=True: state JSON ignored, full reprocessing")
         return {"baseline": {"built": False}}
     p = state_path(data_dir)
     if p.exists():
         try:
             with p.open("r", encoding="utf-8") as f:
                 state = json.load(f)
-            # Assicura le chiavi obbligatorie anche su file vecchi
+            # Ensure required keys are present even on old files
             state.setdefault("baseline", {"built": False})
-            # Migrazione da vecchio formato: processed_scenes -> last_processed_dt
+            # Migration from old format: processed_scenes -> last_processed_dt
             if "processed_scenes" in state and "last_processed_dt" not in state:
                 scene_dates = [v.get("date", "") for v in state["processed_scenes"].values()
                                if v.get("date")]
                 if scene_dates:
                     state["last_processed_dt"] = max(scene_dates)
-                    logger.info("Migrazione stato: watermark derivato da processed_scenes: %s",
+                    logger.info("State migration: watermark derived from processed_scenes: %s",
                                 state["last_processed_dt"])
                 del state["processed_scenes"]
             return state
         except (json.JSONDecodeError, OSError) as exc:
-            logger.warning("Stato JSON non leggibile (%s), ripartenza da zero: %s", p, exc)
+            logger.warning("State JSON not readable (%s), restarting from scratch: %s", p, exc)
     return {"baseline": {"built": False}}
 
 
 def save_state(state, data_dir):
-    """Salva lo stato su JSON."""
+    """Save state to JSON."""
     p = state_path(data_dir)
     Path(data_dir).mkdir(parents=True, exist_ok=True)
     with p.open("w", encoding="utf-8") as f:
@@ -79,13 +80,13 @@ def save_state(state, data_dir):
 # ---------------------------------------------------------------------------
 
 def mark_baseline_built(state, n_scenes, coverage_pct, scene_ids):
-    """Registra la costruzione della baseline nello stato (in-place).
+    """Record baseline construction in state (in-place).
 
     Parameters
     ----------
     n_scenes : int
-    coverage_pct : float   Copertura 0-100.
-    scene_ids : list[str]  IDs delle scene usate.
+    coverage_pct : float   Coverage 0-100.
+    scene_ids : list[str]  IDs of the scenes used.
     """
     state["baseline"] = {
         "built": True,
@@ -97,26 +98,26 @@ def mark_baseline_built(state, n_scenes, coverage_pct, scene_ids):
 
 
 # ---------------------------------------------------------------------------
-# Watermark monitoraggio
+# Monitoring watermark
 # ---------------------------------------------------------------------------
 
 def get_watermark(state):
-    """ISO 8601 datetime dell'ultima scena processata, o None se prima esecuzione.
+    """ISO 8601 datetime of the last processed scene, or None on first run.
 
-    Usato come limite inferiore (esclusivo) per la query STAC: si recuperano
-    solo scene con datetime > watermark.
+    Used as the exclusive lower bound for the STAC query: only scenes
+    with datetime > watermark are retrieved.
     """
     return state.get("last_processed_dt")
 
 
 def update_watermark(state, scene_datetime):
-    """Aggiorna il watermark se scene_datetime e' piu' recente (in-place).
+    """Update the watermark if scene_datetime is more recent (in-place).
 
     Parameters
     ----------
     scene_datetime : str
-        ISO 8601 datetime della scena appena processata
-        (es. "2025-08-14T09:09:52.139000Z").
+        ISO 8601 datetime of the just-processed scene
+        (e.g. "2025-08-14T09:09:52.139000Z").
     """
     current = state.get("last_processed_dt")
     if scene_datetime and (current is None or scene_datetime > current):

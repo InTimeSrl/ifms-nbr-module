@@ -1,22 +1,22 @@
 """
-preprocess.py -- Correzione radiometrica (DN -> riflettanza) e cloud masking (SCL).
+preprocess.py -- Radiometric correction (DN -> reflectance) and cloud masking (SCL).
 
-Usato da:
-  - baseline.py        (costruzione baseline pre-campagna)
-  - pipeline.py        (monitoraggio continuo operativo)
-  - output RGB         (composito true-color per visualizzazione)
+Used by:
+  - baseline.py        (pre-campaign baseline construction)
+  - pipeline.py        (operational continuous monitoring)
+  - RGB output         (true-colour composite for visualisation)
 
 Sentinel-2 Collection 1 L2A (Processing Baseline >= 05.00):
-    riflettanza = DN * 0.0001 - 0.1
+    reflectance = DN * 0.0001 - 0.1
 
-La banda SCL (Scene Classification Layer) e' una mappa di classificazione
-(0-11, uint8) e non richiede correzione radiometrica.
+The SCL band (Scene Classification Layer) is a classification map
+(0-11, uint8) and does not require radiometric correction.
 
-Bande NBR (B8A, B12, SCL): tutte a 20 m, nessun resampling necessario.
-Bande RGB (B4, B3, B2): 10 m nativi; il composito e' prodotto a 10 m,
-  la maschera SCL (20 m) viene ricampionata a 10 m con nearest-neighbour.
+NBR bands (B8A, B12, SCL): all at 20 m, no resampling required.
+RGB bands (B4, B3, B2): native 10 m; the composite is produced at 10 m,
+  the SCL mask (20 m) is resampled to 10 m with nearest-neighbour.
 
-Ref: progetto tecnico, fasi 4 (Radiometric Correction) e 6 (Cloud Masking).
+Ref: technical specification, phases 4 (Radiometric Correction) and 6 (Cloud Masking).
 """
 
 import numpy as np
@@ -24,26 +24,26 @@ import numpy as np
 from . import config
 
 # ---------------------------------------------------------------------------
-# Fallback radiometrici Sentinel-2 Collection 1 L2A
-# Usati SOLO se scale/offset non sono presenti nel JSON STAC della scena.
+# Sentinel-2 Collection 1 L2A radiometric fallbacks
+# Used ONLY if scale/offset are absent from the scene STAC JSON.
 # ---------------------------------------------------------------------------
 _DEFAULT_SCALE = 0.0001
 _DEFAULT_OFFSET = -0.1
 
 
 # ---------------------------------------------------------------------------
-# Funzioni pubbliche
+# Public functions
 # ---------------------------------------------------------------------------
 
 def get_band_calibration(meta, asset_key):
-    """Estrae scale e offset dal JSON STAC per una banda.
+    """Extract scale and offset from the STAC JSON for a band.
 
     Parameters
     ----------
     meta : dict
-        Metadati della scena (da data_io.load_metadata).
+        Scene metadata (from data_io.load_metadata).
     asset_key : str
-        Chiave STAC dell'asset (es. "nir08", "swir22", "red").
+        STAC asset key (e.g. "nir08", "swir22", "red").
 
     Returns
     -------
@@ -57,44 +57,44 @@ def get_band_calibration(meta, asset_key):
 
 
 def dn_to_reflectance(dn, scale=_DEFAULT_SCALE, offset=_DEFAULT_OFFSET):
-    """Converte un array di DN in riflettanza di superficie.
+    """Convert a DN array to surface reflectance.
 
     Formula: rho = DN * scale + offset
-    I valori di scale/offset vanno letti dal JSON STAC della scena
-    tramite get_band_calibration().
+    The scale/offset values should be read from the scene STAC JSON
+    via get_band_calibration().
 
     Parameters
     ----------
     dn : np.ndarray
-        Array 2D di Digital Number (uint16).
+        2D array of Digital Numbers (uint16).
     scale : float
-        Fattore moltiplicativo (default: 0.0001).
+        Multiplicative factor (default: 0.0001).
     offset : float
-        Offset additivo (default: -0.1).
+        Additive offset (default: -0.1).
 
     Returns
     -------
     np.ndarray
-        Riflettanza di superficie (float32).
+        Surface reflectance (float32).
     """
     return dn.astype("float32") * scale + offset
 
 
 def scl_mask(scl, mask_classes=None):
-    """Genera una maschera booleana dai valori SCL.
+    """Generate a boolean mask from SCL values.
 
     Parameters
     ----------
     scl : np.ndarray
-        Array 2D Scene Classification Layer (uint8, valori 0-11).
+        2D Scene Classification Layer array (uint8, values 0-11).
     mask_classes : list[int], optional
-        Classi SCL da mascherare (pixel non validi).
-        Se None, usa config.SCL_MASK_CLASSES.
+        SCL classes to mask (invalid pixels).
+        If None, uses config.SCL_MASK_CLASSES.
 
     Returns
     -------
     np.ndarray (bool)
-        True = pixel valido (non mascherato), False = pixel da scartare.
+        True = valid pixel (not masked), False = pixel to discard.
     """
     if mask_classes is None:
         mask_classes = config.SCL_MASK_CLASSES
@@ -102,33 +102,33 @@ def scl_mask(scl, mask_classes=None):
 
 
 def prepare_bands(nir_raw, swir_raw, scl, meta=None):
-    """Preprocessing completo: DN -> riflettanza + maschera SCL + nodata.
+    """Full preprocessing: DN -> reflectance + SCL mask + nodata.
 
-    Passi:
-    1. Maschera pixel nodata (DN == 0) su NIR e SWIR
-    2. Maschera pixel non validi da SCL (nuvole, ombre, acqua, neve)
-    3. Conversione DN -> riflettanza (scale/offset letti dal JSON STAC)
+    Steps:
+    1. Mask nodata pixels (DN == 0) on NIR and SWIR
+    2. Mask invalid pixels from SCL (clouds, shadows, water, snow)
+    3. Convert DN -> reflectance (scale/offset read from STAC JSON)
 
     Parameters
     ----------
     nir_raw : np.ndarray
-        Banda B8A (NIR, 20 m) come DN uint16.
+        Band B8A (NIR, 20 m) as DN uint16.
     swir_raw : np.ndarray
-        Banda B12 (SWIR, 20 m) come DN uint16.
+        Band B12 (SWIR, 20 m) as DN uint16.
     scl : np.ndarray
-        Banda SCL (Scene Classification Layer, 20 m) uint8.
+        Band SCL (Scene Classification Layer, 20 m) uint8.
     meta : dict, optional
-        Metadati STAC della scena. Se fornito, scale/offset vengono
-        letti da meta["assets"][<band>]. Se None, usa i default C1.
+        Scene STAC metadata. If provided, scale/offset are read from
+        meta["assets"][<band>]. If None, uses C1 defaults.
 
     Returns
     -------
     nir : np.ndarray (float32)
-        Riflettanza NIR.
+        NIR reflectance.
     swir : np.ndarray (float32)
-        Riflettanza SWIR.
+        SWIR reflectance.
     valid_mask : np.ndarray (bool)
-        True = pixel valido per il calcolo NBR.
+        True = valid pixel for NBR computation.
     """
     nodata = config.NODATA_DN
     mask_nodata = (nir_raw == nodata) | (swir_raw == nodata)
@@ -145,38 +145,38 @@ def prepare_bands(nir_raw, swir_raw, scl, meta=None):
 
 
 def prepare_rgb(red_raw, green_raw, blue_raw, scl=None, meta=None):
-    """Preprocessing bande RGB: DN -> riflettanza + maschera opzionale.
+    """Full RGB band preprocessing: DN -> reflectance + optional mask.
 
-    Le bande RGB (B4, B3, B2) sono a 10 m nativi; la SCL e' a 20 m.
-    Se scl e' fornita e ha dimensioni diverse (20 m), viene ricampionata
-    a 10 m con nearest-neighbour per applicare la maschera.
+    RGB bands (B4, B3, B2) are at native 10 m; the SCL is at 20 m.
+    If scl is provided and has different dimensions (20 m), it is resampled
+    to 10 m with nearest-neighbour before applying the mask.
 
     Parameters
     ----------
     red_raw : np.ndarray
-        Banda B4 (Red, 10 m) come DN uint16.
+        Band B4 (Red, 10 m) as DN uint16.
     green_raw : np.ndarray
-        Banda B3 (Green, 10 m) come DN uint16.
+        Band B3 (Green, 10 m) as DN uint16.
     blue_raw : np.ndarray
-        Banda B2 (Blue, 10 m) come DN uint16.
+        Band B2 (Blue, 10 m) as DN uint16.
     scl : np.ndarray, optional
-        Banda SCL (20 m) uint8. Se fornita, i pixel non validi vengono
-        mascherati (impostati a 0 nel composito).
+        SCL band (20 m) uint8. If provided, invalid pixels are masked
+        (set to 0 in the composite).
     meta : dict, optional
-        Metadati STAC della scena (per scale/offset per banda).
+        Scene STAC metadata (for per-band scale/offset).
 
     Returns
     -------
     rgb : np.ndarray (float32)
-        Array (3, H, W) con riflettanza [R, G, B], clippata a [0, 1].
+        Array (3, H, W) with reflectance [R, G, B], clipped to [0, 1].
     valid_mask : np.ndarray (bool)
-        Maschera pixel validi alla risoluzione RGB (H, W).
-        Se scl e' None, tutti i pixel non-nodata sono validi.
+        Valid pixel mask at RGB resolution (H, W).
+        If scl is None, all non-nodata pixels are valid.
     """
     nodata = config.NODATA_DN
-    # AND: un pixel è nodata solo se TUTTE le bande sono zero (bordi tile).
-    # Con OR, bande singole a DN basso (es. B2 su vegetazione scura) bucano
-    # pixel validi in tutto il raster.
+    # AND: a pixel is nodata only if ALL bands are zero (tile borders).
+    # With OR, single bands at low DN (e.g. B2 on dark vegetation) would punch
+    # holes in valid pixels across the entire raster.
     mask_nodata = (red_raw == nodata) & (green_raw == nodata) & (blue_raw == nodata)
 
     r_s, r_o = get_band_calibration(meta, "red") if meta else (_DEFAULT_SCALE, _DEFAULT_OFFSET)
@@ -187,14 +187,14 @@ def prepare_rgb(red_raw, green_raw, blue_raw, scl=None, meta=None):
     green = dn_to_reflectance(green_raw, g_s, g_o)
     blue = dn_to_reflectance(blue_raw, b_s, b_o)
 
-    # Clip a [0, 1] per visualizzazione
+    # Clip to [0, 1] for visualisation
     rgb = np.clip(np.array([red, green, blue]), 0.0, 1.0)
 
     valid_mask = ~mask_nodata
 
     if scl is not None:
         mask_scl = scl_mask(scl)
-        # Se SCL e' a 20 m e RGB a 10 m, ricampiona nearest-neighbour
+        # If SCL is at 20 m and RGB at 10 m, resample with nearest-neighbour
         if mask_scl.shape != valid_mask.shape:
             mask_scl = _upsample_nearest(mask_scl, valid_mask.shape)
         valid_mask = valid_mask & mask_scl
@@ -203,19 +203,19 @@ def prepare_rgb(red_raw, green_raw, blue_raw, scl=None, meta=None):
 
 
 def _upsample_nearest(arr, target_shape):
-    """Ricampiona un array 2D a target_shape con nearest-neighbour.
+    """Resample a 2D array to target_shape with nearest-neighbour.
 
     Parameters
     ----------
     arr : np.ndarray
-        Array 2D sorgente (es. 20 m).
+        Source 2D array (e.g. 20 m).
     target_shape : tuple
-        (height, width) target (es. 10 m).
+        (height, width) target (e.g. 10 m).
 
     Returns
     -------
     np.ndarray
-        Array ricampionato.
+        Resampled array.
     """
     row_idx = np.linspace(0, arr.shape[0] - 1, target_shape[0]).round().astype(int)
     col_idx = np.linspace(0, arr.shape[1] - 1, target_shape[1]).round().astype(int)

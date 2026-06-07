@@ -1,9 +1,9 @@
 """
-baseline.py -- Baseline NBR retrospettiva (pre-campagna).
+baseline.py -- Pre-campaign retrospective baseline NBR.
 
-One-shot: recupera scene dalla finestra di lookback, filtra, calcola NBR,
-costruisce median composite con filtro anomalie MAD, salva su disco
-(baseline_nbr, previous_nbr, max_dnbr).
+One-shot: retrieves scenes from the look-back window, filters them,
+computes NBR, builds a median composite with MAD anomaly filter, and
+saves to disk (baseline_nbr, previous_nbr, max_dnbr).
 """
 
 import logging
@@ -29,18 +29,18 @@ def _nanmedian_no_allnan_warning(arr, axis=0):
 
 
 # ---------------------------------------------------------------------------
-# Path dei file NBR persistenti per un'AOI
+# Persistent NBR file paths for a tile
 # ---------------------------------------------------------------------------
 
 def nbr_paths(aoi, data_dir="data"):
-    """Restituisce i path dei file NBR persistenti per un'AOI.
+    """Return the paths of persistent NBR files for an AOI.
 
     Parameters
     ----------
     aoi : dict
-        AOI dict (da data_io.load_aoi).
-    data_dir : str o Path
-        Cartella radice dati persistenti.
+        AOI dict (from data_io.load_aoi).
+    data_dir : str or Path
+        Root folder for persistent data.
 
     Returns
     -------
@@ -57,26 +57,26 @@ def nbr_paths(aoi, data_dir="data"):
 
 
 def load_nbr(path):
-    """Carica un raster NBR da disco. Restituisce (array, profile) o (None, None)."""
+    """Load an NBR raster from disk. Returns (array, profile) or (None, None)."""
     if Path(path).exists():
         return data_io.read_band(str(path))
     return None, None
 
 
 def save_nbr(data, profile, path):
-    """Salva un raster NBR su disco."""
+    """Save an NBR raster to disk."""
     data_io.write_geotiff(data, profile, path, dtype="float32")
 
 
 # ---------------------------------------------------------------------------
-# Filtri e calcolo NBR da scena singola
+# Filters and per-scene NBR computation
 # ---------------------------------------------------------------------------
 
 def _filter_baseline_scenes(scenes):
-    """Filtra le scene pre-campagna per qualita' (cloud cover, processing baseline).
+    """Filter pre-campaign scenes by quality (cloud cover, processing baseline).
 
-    Le scene pre-campagna non sono tracciate dal watermark: il filtro
-    controlla solo i criteri di qualita' radiometrica.
+    Pre-campaign scenes are not tracked by the watermark: the filter
+    only checks radiometric quality criteria.
     """
     valid = []
     for scene in scenes:
@@ -91,25 +91,25 @@ def _filter_baseline_scenes(scenes):
 
 
 def compute_nbr_from_scene(scene, aoi, scene_dir):
-    """Carica una scena e restituisce (nbr, nir, valid_mask, profile) o None.
+    """Load a scene and return (nbr, nir, swir, valid_mask, profile) or None.
 
     Parameters
     ----------
     scene : dict
-        Metadati della scena.
+        Scene metadata.
     aoi : dict
         AOI dict.
-    scene_dir : str o Path
-        Cartella locale dei TIF.
+    scene_dir : str or Path
+        Local TIF folder.
 
     Returns
     -------
-    tuple (nbr, nir, valid_mask, profile) o None
-        None solo se la scena e' completamente priva di pixel validi
-        (caso degenere). Il filtro di qualita' operativo e'
-        ``SCENE_VALID_SCL_PCT`` applicato a valle nel monitoring.
+    tuple (nbr, nir, swir, valid_mask, profile) or None
+        None only if the scene has no valid pixels at all (degenerate case).
+        The operational quality filter (SCENE_VALID_SCL_PCT) is applied
+        downstream in the monitoring loop.
     """
-    # Rileva CRS reale dalla prima banda raster (non dai metadati)
+    # Detect actual CRS from the first raster band (not from metadata)
     raster_crs = data_io.get_scene_crs(scene, scene_dir)
     bbox = data_io.get_aoi_bbox_raster(aoi, raster_crs)
     asset_keys = ["nir08", "swir22", "scl"]
@@ -127,46 +127,46 @@ def compute_nbr_from_scene(scene, aoi, scene_dir):
 
 
 # ---------------------------------------------------------------------------
-# Costruzione baseline retrospettiva
+# Retrospective baseline construction
 # ---------------------------------------------------------------------------
 
 def build_baseline(aoi, get_scenes_fn, scene_dir=None, data_dir="data"):
-    """Costruisce la baseline NBR retrospettiva per un'AOI.
+    """Build the retrospective NBR baseline for an AOI.
 
-    Recupera scene dalla finestra PRE-campagna, costruisce un median
-    composite con filtro anomalie MAD, e salva baseline_nbr.tif +
-    baseline_count.tif rimosso. Inizializza previous_nbr e max_dnbr.
+    Retrieves scenes from the pre-campaign look-back window, builds a
+    median composite with MAD anomaly filter, and saves baseline_nbr.tif.
+    Initialises previous_nbr and max_dnbr.
 
     Parameters
     ----------
     aoi : dict
-        AOI dict (da data_io.load_aoi).
+        AOI dict (from data_io.load_aoi).
     get_scenes_fn : callable
-        Funzione per recuperare le scene: get_scenes_fn(date_from) -> list[dict].
-        Deve restituire scene per l'AOI a partire dalla data indicata.
-    scene_dir : str o Path, optional
-        Cartella locale con scene di test.
+        Function to retrieve scenes: get_scenes_fn(date_from) -> list[dict].
+        Must return scenes for the AOI starting from the given date.
+    scene_dir : str or Path, optional
+        Local folder with test scenes.
     data_dir : str, optional
-        Cartella dati persistenti (default: "data").
+        Persistent data folder (default: "data").
 
     Returns
     -------
     baseline_nbr : np.ndarray
-        Median composite (con filtro anomalie).
+        Median composite (with anomaly filter applied).
     profile : dict
-        Profilo rasterio del composite.
+        Rasterio profile of the composite.
 
     Raises
     ------
     RuntimeError
-        Se non ci sono abbastanza scene cloud-free nella finestra.
+        If there are not enough cloud-free scenes in the look-back window.
     """
     aoi_name = aoi["name"]
     paths = nbr_paths(aoi, data_dir)
-    logger.info("Costruzione baseline retrospettiva per AOI '%s'", aoi_name)
+    logger.info("Building retrospective baseline for AOI '%s'", aoi_name)
 
-    # --- Calcola finestra di lookback ---
-    # CAMPAIGN_START_DATE = None → usa oggi come inizio campagna
+    # --- Compute look-back window ---
+    # CAMPAIGN_START_DATE = None -> use today as campaign start
     if config.CAMPAIGN_START_DATE is None:
         campaign_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
     else:
@@ -175,7 +175,7 @@ def build_baseline(aoi, get_scenes_fn, scene_dir=None, data_dir="data"):
 
     all_scenes = get_scenes_fn(date_from=lookback_start.isoformat())
 
-    # Tieni solo scene nella finestra pre-campagna
+    # Keep only scenes in the pre-campaign window
     campaign_str = config.CAMPAIGN_START_DATE
     pre_scenes = [
         s for s in all_scenes
@@ -184,28 +184,28 @@ def build_baseline(aoi, get_scenes_fn, scene_dir=None, data_dir="data"):
     pre_scenes = _filter_baseline_scenes(pre_scenes)
 
     logger.info(
-        "Baseline: %d scene pre-campagna trovate (finestra %s -> %s)",
+        "Baseline: %d pre-campaign scenes found (window %s -> %s)",
         len(pre_scenes), lookback_start.date(), campaign_start.date(),
     )
 
     if len(pre_scenes) < config.BASELINE_MIN_SCENES:
         raise RuntimeError(
-            f"AOI '{aoi_name}': solo {len(pre_scenes)} scene pre-campagna, "
-            f"servono almeno {config.BASELINE_MIN_SCENES}. "
-            f"Ampliare BASELINE_LOOKBACK_DAYS o verificare i dati."
+            f"AOI '{aoi_name}': only {len(pre_scenes)} pre-campaign scenes found, "
+            f"need at least {config.BASELINE_MIN_SCENES}. "
+            f"Increase BASELINE_LOOKBACK_DAYS or check the data."
         )
 
-    # --- Costruisci stack NBR ---
+    # --- Build NBR stack ---
     stack_list = []
     last_profile = None
     for i, scene in enumerate(pre_scenes, 1):
         logger.info(
-            "  [%d/%d] download scena baseline: %s",
+            "  [%d/%d] downloading baseline scene: %s",
             i, len(pre_scenes), scene["stac_item_id"],
         )
         result = compute_nbr_from_scene(scene, aoi, scene_dir)
         if result is None:
-            logger.info("  [%d/%d] skip %s: nessun pixel valido",
+            logger.info("  [%d/%d] skip %s: no valid pixels",
                         i, len(pre_scenes), scene["stac_item_id"])
             continue
         nbr, _nir, _swir, valid_mask, profile = result
@@ -216,22 +216,22 @@ def build_baseline(aoi, get_scenes_fn, scene_dir=None, data_dir="data"):
 
     if len(stack_list) < config.BASELINE_MIN_SCENES:
         raise RuntimeError(
-            f"AOI '{aoi_name}': solo {len(stack_list)} scene utilizzabili "
-            f"(dopo filtro qualita'), servono almeno {config.BASELINE_MIN_SCENES}."
+            f"AOI '{aoi_name}': only {len(stack_list)} usable scenes "
+            f"(after quality filter), need at least {config.BASELINE_MIN_SCENES}."
         )
 
     stack = np.array(stack_list, dtype="float32")  # (N, H, W)
 
-    # --- Filtro anomalie MAD: scarta osservazioni anomalmente basse ---
-    # Per ogni pixel, calcola mediana e MAD (Median Absolute Deviation)
-    # lungo l'asse temporale. Il MAD e' robusto agli outlier (breakdown
-    # point 50%), a differenza della deviazione standard (breakdown 0%).
-    # Rif: Leys et al. 2013, Rousseeuw & Croux 1993.
+    # --- MAD anomaly filter: discard anomalously low observations ---
+    # For each pixel, compute the median and MAD (Median Absolute Deviation)
+    # along the time axis. MAD is robust to outliers (50% breakdown point),
+    # unlike standard deviation (0% breakdown point).
+    # Ref: Leys et al. 2013, Rousseeuw & Croux 1993.
     pixel_median = _nanmedian_no_allnan_warning(stack, axis=0)
     pixel_mad = _nanmedian_no_allnan_warning(
         np.abs(stack - pixel_median[np.newaxis, :, :]), axis=0,
     )
-    # Pavimento: se MAD < eps, le osservazioni sono quasi identiche -> non filtrare
+    # Floor: if MAD < eps, observations are nearly identical -> skip filtering
     pixel_mad = np.maximum(pixel_mad, config.BASELINE_MAD_FLOOR)
     k = config.BASELINE_MAD_K
     threshold = pixel_median - k * pixel_mad
@@ -240,7 +240,7 @@ def build_baseline(aoi, get_scenes_fn, scene_dir=None, data_dir="data"):
     if n_anomalies > 0:
         stack[anomaly_mask] = np.nan
         logger.info(
-            "Filtro anomalie MAD: rimossi %d pixel/scena (%.2f%% dello stack)",
+            "MAD anomaly filter: removed %d pixel/scene observations (%.2f%% of stack)",
             n_anomalies, 100.0 * n_anomalies / stack.size,
         )
 
@@ -248,18 +248,18 @@ def build_baseline(aoi, get_scenes_fn, scene_dir=None, data_dir="data"):
     baseline_nbr = _nanmedian_no_allnan_warning(stack, axis=0)
     count = np.sum(~np.isnan(stack), axis=0)
 
-    # --- Salva su disco ---
+    # --- Save to disk ---
     paths["baseline"].parent.mkdir(parents=True, exist_ok=True)
     save_nbr(baseline_nbr, last_profile, paths["baseline"])
 
-    # previous_nbr = baseline_nbr (FOTO_VERDE)
+    # previous_nbr = baseline_nbr (green reference)
     save_nbr(baseline_nbr.copy(), last_profile, paths["previous"])
 
-    # max_dnbr = 0 (nessun danno registrato)
+    # max_dnbr = 0 (no damage recorded yet)
     save_nbr(np.zeros_like(baseline_nbr), last_profile, paths["max_dnbr"])
 
     logger.info(
-        "Baseline completata: %d scene, mediana osservazioni/pixel: %.0f",
+        "Baseline complete: %d scenes, median observations/pixel: %.0f",
         len(stack_list),
         np.median(count[count > 0]) if (count > 0).any() else 0,
     )
@@ -267,50 +267,50 @@ def build_baseline(aoi, get_scenes_fn, scene_dir=None, data_dir="data"):
 
 
 # ---------------------------------------------------------------------------
-# Costruzione baseline da lista metadati pre-fetched (flusso STAC operativo)
+# Baseline construction from pre-fetched metadata (operational STAC flow)
 # ---------------------------------------------------------------------------
 
 def build_baseline_from_metas(aoi, pre_metas, tile_id, tile_data_dir,
                               scene_dir=None, campaign_start=None):
-    """Costruisce la baseline NBR da una lista di metadati pre-fetched.
+    """Build the NBR baseline from a pre-fetched list of scene metadata.
 
-    Usato nel flusso STAC operativo dove le scene sono già state
-    recuperate e filtrate prima dell'invocazione (funzione main()).
+    Used in the operational STAC flow where scenes have already been
+    retrieved and filtered before this call (by main()).
 
-    Se la baseline è già su disco per questo tile, la salta.
+    Skips the build if a baseline already exists on disk for this tile.
 
     Parameters
     ----------
     aoi : dict
-        AOI dict (da data_io.load_aoi).
+        AOI dict (from data_io.load_aoi).
     pre_metas : list[dict]
-        Lista di metadati scena (da data_io.query_stac + _filter_scenes).
+        List of scene metadata (from data_io.query_stac + _filter_scenes).
     tile_id : str
-        Tile MGRS (es. T34SFG).
+        MGRS tile (e.g. T34SFG).
     tile_data_dir : str
-        Cartella dati persistenti del tile.
-    scene_dir : str o Path, optional
-        Cartella locale dei TIF (None per lettura remota COG).
+        Persistent data folder for this tile.
+    scene_dir : str or Path, optional
+        Local TIF folder (None for remote COG reading).
     campaign_start : date, optional
-        Data di inizio campagna; salvata nello stato tile se fornita.
+        Campaign start date; saved to tile state if provided.
 
     Returns
     -------
     bool
-        True se baseline disponibile (già esistente o appena costruita).
+        True if the baseline is available (already existed or just built).
     """
     paths = nbr_paths(aoi, tile_data_dir)
     existing, _ = load_nbr(paths["baseline"])
     if existing is not None:
-        logger.info("Baseline tile %s gia' presente, salto costruzione", tile_id)
+        logger.info("Baseline tile %s already present, skipping build", tile_id)
         return True
 
     tile_metas = [m for m in pre_metas if _tile_id_from_meta(m) == tile_id]
     if not tile_metas:
-        logger.warning("Nessuna scena pre-campagna per tile %s", tile_id)
+        logger.warning("No pre-campaign scenes for tile %s", tile_id)
         return False
 
-    logger.info("Costruzione baseline tile %s: %d scene candidate", tile_id, len(tile_metas))
+    logger.info("Building baseline tile %s: %d candidate scenes", tile_id, len(tile_metas))
 
     stack_list = []
     last_profile = None
@@ -326,7 +326,7 @@ def build_baseline_from_metas(aoi, pre_metas, tile_id, tile_data_dir,
 
     if len(stack_list) < config.BASELINE_MIN_SCENES:
         logger.error(
-            "Tile %s: solo %d scene utilizzabili (servono %d) — baseline non costruita",
+            "Tile %s: only %d usable scenes (need %d) — baseline not built",
             tile_id, len(stack_list), config.BASELINE_MIN_SCENES,
         )
         return False
@@ -342,7 +342,7 @@ def build_baseline_from_metas(aoi, pre_metas, tile_id, tile_data_dir,
     n_anom = int(np.count_nonzero(anomaly_mask))
     if n_anom > 0:
         stack[anomaly_mask] = np.nan
-        logger.info("Filtro MAD tile %s: rimossi %d pixel/scena (%.2f%%)",
+        logger.info("MAD filter tile %s: removed %d pixel/scene observations (%.2f%%)",
                     tile_id, n_anom, 100.0 * n_anom / stack.size)
 
     baseline_nbr = _nanmedian_no_allnan_warning(stack, axis=0)
@@ -363,13 +363,13 @@ def build_baseline_from_metas(aoi, pre_metas, tile_id, tile_data_dir,
         tile_state["baseline"]["campaign_start"] = str(campaign_start)
     pipeline_state.save_state(tile_state, tile_data_dir)
 
-    logger.info("Baseline tile %s: %d scene, copertura %.1f%%",
+    logger.info("Baseline tile %s: %d scenes, coverage %.1f%%",
                 tile_id, len(stack_list), coverage * 100)
     return True
 
 
 def _tile_id_from_meta(meta):
-    """Estrae il tile MGRS dallo stac_item_id (es. S2A_T35SMC_... -> T35SMC)."""
+    """Extract the MGRS tile ID from stac_item_id (e.g. S2A_T35SMC_... -> T35SMC)."""
     scene_id = meta.get("stac_item_id", "")
     parts = scene_id.split("_")
     return parts[1] if len(parts) >= 2 else "unknown"

@@ -1,16 +1,16 @@
 """
-indices.py -- Calcolo indici spettrali per il rilevamento aree bruciate.
+indices.py -- Spectral index computation for burned area detection.
 
-Indici implementati:
+Indices implemented:
   - NBR  = (NIR - SWIR) / (NIR + SWIR)
   - dNBR = NBR_pre - NBR_post
   - RBR  = dNBR / (NBR_pre + 1.001)
 
-Usato da:
-  - baseline.py   (compute_nbr per la costruzione del composite)
-  - pipeline.py   (compute_dnbr / compute_rbr per il monitoraggio continuo)
+Used by:
+  - baseline.py   (compute_nbr for composite construction)
+  - pipeline.py   (compute_dnbr / compute_rbr for continuous monitoring)
 
-La scelta tra dNBR e RBR e' configurata in config.INDEX_MODE.
+The choice between dNBR and RBR is configured via config.INDEX_MODE.
 
 Ref: Key & Benson 2006 (dNBR), Parks et al. 2014 (RBR).
 """
@@ -24,14 +24,14 @@ def compute_nbr(nir, swir):
     Parameters
     ----------
     nir : np.ndarray (float32)
-        Riflettanza banda B8A (da preprocess.prepare_bands).
+        Band B8A reflectance (from preprocess.prepare_bands).
     swir : np.ndarray (float32)
-        Riflettanza banda B12 (da preprocess.prepare_bands).
+        Band B12 reflectance (from preprocess.prepare_bands).
 
     Returns
     -------
     np.ndarray (float32)
-        Valori NBR, tipicamente in [-1, 1]. Divisione per zero -> 0.
+        NBR values, typically in [-1, 1]. Division by zero -> 0.
     """
     denom = nir + swir
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -42,14 +42,14 @@ def compute_nbr(nir, swir):
 def compute_dnbr(nbr_pre, nbr_post):
     """Differenced NBR: dNBR = NBR_pre - NBR_post.
 
-    Valori positivi indicano perdita di vegetazione (potenziale incendio).
+    Positive values indicate vegetation loss (potential fire).
 
     Parameters
     ----------
     nbr_pre : np.ndarray (float32)
-        NBR pre-evento (baseline o previous).
+        Pre-event NBR (baseline or previous).
     nbr_post : np.ndarray (float32)
-        NBR post-evento (scena corrente).
+        Post-event NBR (current scene).
 
     Returns
     -------
@@ -61,18 +61,18 @@ def compute_dnbr(nbr_pre, nbr_post):
 def compute_rbr(nbr_pre, nbr_post):
     """Relativized Burn Ratio: RBR = dNBR / (NBR_pre + 1.001).
 
-    Normalizza il dNBR rispetto al valore pre-evento, riducendo la
-    dipendenza dalla copertura vegetale iniziale. Utile in aree
-    eterogenee (mix vegetazione/suolo nudo).
+    Normalises dNBR relative to the pre-event value, reducing dependence
+    on initial vegetation cover. Useful in heterogeneous areas
+    (mix of vegetation and bare soil).
 
-    L'offset 1.001 evita la divisione per zero (NBR_pre = -1 teorico).
+    The 1.001 offset avoids division by zero (theoretical NBR_pre = -1).
 
     Parameters
     ----------
     nbr_pre : np.ndarray (float32)
-        NBR pre-evento.
+        Pre-event NBR.
     nbr_post : np.ndarray (float32)
-        NBR post-evento.
+        Post-event NBR.
 
     Returns
     -------
