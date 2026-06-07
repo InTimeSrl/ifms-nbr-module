@@ -203,6 +203,24 @@ def process_aoi(aoi, scene_dir=None, stac_client=None, output_dir="output",
         tile_output_dir = str(Path(output_dir) / tile_id)
         logger.info("--- AOI '%s' | Tile %s ---", aoi_name, tile_id)
 
+        # FORCE_REPROCESS: cancella tutti i dati e output della tile prima di
+        # ricominciare da zero. WARNING prominente nel log.
+        if config.FORCE_REPROCESS:
+            logger.warning(
+                "FORCE_REPROCESS=True — cancellazione dati e output tile %s", tile_id
+            )
+            import shutil as _shutil
+            # dati (baseline, previous_nbr, max_dnbr, pipeline_state)
+            _data_p = Path(tile_data_dir)
+            if _data_p.exists():
+                _shutil.rmtree(str(_data_p))
+                logger.warning("  Eliminata cartella dati: %s", _data_p)
+            # output (events_index, gpkg, tif, sottocartelle evento)
+            _out_p = Path(tile_output_dir)
+            if _out_p.exists():
+                _shutil.rmtree(str(_out_p))
+                logger.warning("  Eliminata cartella output: %s", _out_p)
+
         # Watermark: datetime ISO 8601 dell'ultima scena processata.
         # Solo scene con datetime > watermark vengono incluse nel loop.
         tile_state = pipeline_state.load_state(tile_data_dir)

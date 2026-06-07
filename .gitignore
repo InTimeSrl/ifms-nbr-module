@@ -17,6 +17,7 @@ check_*.py
 download_*.py
 reset*.py
 sample_*.py
+html_to_pptx.py
 
 # === Notebook e documentazione locale ===
 *.ipynb
