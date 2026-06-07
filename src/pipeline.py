@@ -772,6 +772,9 @@ def _build_baseline_from_metas(aoi, pre_metas, tile_id, tile_data_dir,
 
 # Formati vettoriali supportati per le AOI, in ordine di priorità.
 # GeoParquet richiede GDAL >= 3.5 compilato con il driver Arrow/Parquet.
+# Per aggiungere una nuova AOI: creare una sottocartella in AOIs/ con un
+# file vettoriale in uno dei formati elencati. Il nome della cartella è
+# l'identificatore AOI. Per cambiare la cartella radice usare --aois-root.
 _AOI_EXTENSIONS = [".geojson", ".gpkg", ".shp", ".kml", ".gml", ".parquet"]
 
 

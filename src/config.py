@@ -180,7 +180,7 @@ HOLE_FILL_PIXELS = 500           # riempi buchi < 500 pixel (~20 ha) nei poligon
 # 8. BASELINE -- median composite pre-campagna
 # ===========================================================================
 
-CAMPAIGN_START_DATE = "2024-06-01"  # None = campagna parte da oggi; "YYYY-MM-DD" = data esplicita
+CAMPAIGN_START_DATE = "2026-06-01"  # None = campagna parte da oggi; "YYYY-MM-DD" = data esplicita
                                     # Nota: la baseline viene costruita una sola volta e salvata su disco
                                     # (<output>/<aoi>/<tile>/baseline_nbr.tif). Ai run successivi viene
                                     # ricaricata dal file esistente, indipendentemente da questo parametro.

@@ -463,6 +463,28 @@ def write_geopackage(features, out_path, crs=None, layer_name="burnt"):
 # ---------------------------------------------------------------------------
 # Lettura AOI
 # ---------------------------------------------------------------------------
+# Le AOI vengono scoperte automaticamente da pipeline.py (_scan_aois) che
+# scansiona la cartella AOIs/ (o quella passata con --aois-root).
+# Struttura attesa:
+#
+#   AOIs/
+#     <nome_aoi>/
+#       <file_vettoriale>.<ext>    <- .geojson | .gpkg | .shp | .kml | .gml
+#
+# Per aggiungere una nuova AOI: creare una sottocartella in AOIs/ e
+# inserirvi un file vettoriale in uno dei formati supportati.
+# Il nome della sottocartella diventa l'identificatore AOI usato nei log,
+# nei path di output e nel flag --aoi.
+#
+# Per cambiare la cartella di default: usare --aois-root <path> a riga di
+# comando, oppure modificare il default in pipeline.py:
+#   p.add_argument("--aois-root", default="AOIs", ...)
+#
+# Il file vettoriale può contenere qualsiasi geometria (Polygon,
+# MultiPolygon); viene letta solo la prima feature. Il CRS può essere
+# qualsiasi proiezione leggibile da Fiona — la pipeline riproietta
+# internamente in WGS84 per le query STAC.
+# ---------------------------------------------------------------------------
 
 def load_aoi(path):
     """Carica un'AOI da un file vettoriale e restituisce geometria + bbox.
